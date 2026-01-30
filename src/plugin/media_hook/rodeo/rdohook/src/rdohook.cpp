@@ -5,6 +5,8 @@
 #include <set>
 #include <cstdlib>
 
+#include <spdlog/spdlog.h>
+
 #include "xstudio/media_hook/media_hook.hpp"
 #include "xstudio/utility/helpers.hpp"
 #include "xstudio/utility/string_helpers.hpp"
@@ -113,6 +115,10 @@ class RodeoMediaHook : public MediaHook {
         if (!shot.empty()) {
             result["metadata"]["external"]["RodeoFX"]["shot"] = shot;
         }
+
+        spdlog::debug(
+            "RodeoMediaHook::modify_metadata colour_pipeline={}",
+            result["colour_pipeline"].dump());
 
         return result;
     }
@@ -399,10 +405,24 @@ class RodeoMediaHook : public MediaHook {
                     r["input_colorspace"] = "Utility - Raw";
                 }
             }
+
+            spdlog::debug(
+                "RodeoMediaHook::colour_params path={} show={} seq={} shot={} "
+                "ocio_config={} override_view={} is_baked={}",
+                path,
+                show,
+                seq,
+                shot,
+                ocio_config.empty() ? "(none)" : ocio_config,
+                override_view.empty() ? "(none)" : override_view,
+                needs_raw_input);
         } else {
             // No show context - use raw passthrough
             r["ocio_config"]   = "__raw__";
             r["working_space"] = "raw";
+            spdlog::debug(
+                "RodeoMediaHook::colour_params path={} - no show found, using raw passthrough",
+                path);
         }
 
         return r;
