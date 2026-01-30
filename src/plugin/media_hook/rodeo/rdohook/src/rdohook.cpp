@@ -274,7 +274,21 @@ class RodeoMediaHook : public MediaHook {
     }
 
     /**
+     * Check if path is an asset (vs a shot).
+     *
+     * @param path Path to check
+     * @return true if path contains "/assets/"
+     */
+    bool is_asset(const std::string &path) {
+        std::string lower_path = path;
+        std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
+        return lower_path.find("/assets/") != std::string::npos;
+    }
+
+    /**
      * Get the view override based on media type.
+     * Only used for baked media (MOV/stills) that need raw passthrough.
+     * EXR views are handled via automatic_view instead.
      *
      * @param path Path to media file
      * @return Pair of (view_name, needs_raw_input) - view_name empty if no override needed
@@ -282,10 +296,6 @@ class RodeoMediaHook : public MediaHook {
     std::pair<std::string, bool> get_override_view_for_path(const std::string &path) {
         if (is_baked_media(path)) {
             return {"raw", true};
-        }
-
-        if (is_lineup_exr(path)) {
-            return {"Client-look (non-wb)", false};
         }
 
         return {"", false};
@@ -414,13 +424,21 @@ class RodeoMediaHook : public MediaHook {
                 }
             }
 
-            // Set automatic view for EXR files (client look by default)
-            // This ensures EXRs get proper color management when switching sources
+            // Set automatic view for EXR files based on type
+            // - Lineup EXR: Client-look (non-wb)
+            // - Asset EXR: Neutral-look
+            // - Shot EXR: Client-look
+            std::string auto_view = "(none)";
             if (!is_baked_media(path)) {
-                r["automatic_view"] = "Client-look";
+                if (is_lineup_exr(path)) {
+                    auto_view = "Client-look (non-wb)";
+                } else if (is_asset(path)) {
+                    auto_view = "Neutral-look";
+                } else {
+                    auto_view = "Client-look";
+                }
+                r["automatic_view"] = auto_view;
             }
-
-            std::string auto_view = is_baked_media(path) ? "(none)" : "Client-look";
             spdlog::warn(
                 "RodeoMediaHook::colour_params path={} show={} seq={} shot={} "
                 "ocio_config={} override_view={} automatic_view={} is_baked={}",
