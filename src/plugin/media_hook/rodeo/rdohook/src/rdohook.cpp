@@ -408,15 +408,23 @@ class RodeoMediaHook : public MediaHook {
                 }
             }
 
+            // Set automatic view for EXR files (client look by default)
+            // This ensures EXRs get proper color management when switching sources
+            if (!is_baked_media(path)) {
+                r["automatic_view"] = "Client-look";
+            }
+
+            std::string auto_view = is_baked_media(path) ? "(none)" : "Client-look";
             spdlog::warn(
                 "RodeoMediaHook::colour_params path={} show={} seq={} shot={} "
-                "ocio_config={} override_view={} is_baked={}",
+                "ocio_config={} override_view={} automatic_view={} is_baked={}",
                 path,
                 show,
                 seq,
                 shot,
                 ocio_config.empty() ? "(none)" : ocio_config,
                 override_view.empty() ? "(none)" : override_view,
+                auto_view,
                 needs_raw_input);
         } else {
             // No show context - use raw passthrough
