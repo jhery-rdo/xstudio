@@ -35,12 +35,12 @@ set_target_properties(media_hook_rodeo PROPERTIES
     CXX_STANDARD_REQUIRED ON
 )
 
-# Install to xStudio plugin directory
+# Install to xStudio plugin directory (for make install)
 install(TARGETS media_hook_rodeo
-    LIBRARY DESTINATION share/xstudio/plugin/media_hook
+    LIBRARY DESTINATION share/xstudio/plugin
 )
 
 # Install preference file
 install(FILES src/plugin_rodeo_media_hook.json
-    DESTINATION share/xstudio/plugin/media_hook
+    DESTINATION share/xstudio/preference
 )
