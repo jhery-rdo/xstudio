@@ -446,7 +446,7 @@ plugin_manager::PluginFactoryCollection *plugin_factory_collection_ptr() {
             {std::make_shared<MediaHookPlugin<MediaHookActor<RodeoMediaHook>>>(
                 Uuid("a7b8c9d0-e1f2-4a5b-8c7d-9e0f1a2b3c4d"),
                 "RodeoFX",
-                "RodeoFX",
+                "xStudio",  // Use "xStudio" as author to auto-enable plugin
                 "RodeoFX Media Hook",
                 semver::version("1.0.0"))}));
 }
