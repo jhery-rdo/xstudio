@@ -200,9 +200,12 @@ class RodeoMediaHook : public MediaHook {
         std::smatch match;
 
         // Pattern 1: /shows/SHOW/SEQ/SHOT/ where SEQ is alphanumeric and SHOT is 4 digits
+        // Returns full seq_shot format (e.g., "205042_0130")
         static const std::regex pattern1(R"(/shows/[^/]+/([a-zA-Z0-9]+)/(\d{4})/)");
         if (std::regex_search(path, match, pattern1)) {
-            return {match[1].str(), match[2].str()};
+            std::string seq = match[1].str();
+            std::string shot_num = match[2].str();
+            return {seq, seq + "_" + shot_num};
         }
 
         // Pattern 2: /shows/SHOW/SEQ/SEQ_SHOT/ (full format)
@@ -218,10 +221,13 @@ class RodeoMediaHook : public MediaHook {
         }
 
         // Pattern 4: Filename pattern SEQ_SHOT_*.mov
+        // Returns full seq_shot format (e.g., "205042_0130")
         std::string basename = fs::path(path).filename().string();
         static const std::regex pattern4(R"(^([a-zA-Z0-9]+)_(\d{4})[._])");
         if (std::regex_search(basename, match, pattern4)) {
-            return {match[1].str(), match[2].str()};
+            std::string seq = match[1].str();
+            std::string shot_num = match[2].str();
+            return {seq, seq + "_" + shot_num};
         }
 
         // Pattern 5: 6-digit SEQ in path /SEQ/SEQ_SHOT/
