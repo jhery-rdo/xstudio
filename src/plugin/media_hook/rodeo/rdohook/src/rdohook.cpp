@@ -97,7 +97,7 @@ class RodeoMediaHook : public MediaHook {
         const std::string path = to_string(uri);
         auto ppath             = uri_to_posix_path(uri);
 
-        spdlog::warn("RodeoMediaHook::modify_metadata CALLED for: {}", ppath);
+        spdlog::debug("RodeoMediaHook::modify_metadata CALLED for: {}", ppath);
 
         // Build colour pipeline parameters
         auto colour_p             = colour_params(ppath, metadata);
@@ -118,7 +118,7 @@ class RodeoMediaHook : public MediaHook {
             result["metadata"]["external"]["RodeoFX"]["shot"] = shot;
         }
 
-        spdlog::warn(
+        spdlog::debug(
             "RodeoMediaHook::modify_metadata colour_pipeline={}",
             result["colour_pipeline"].dump());
 
@@ -439,7 +439,7 @@ class RodeoMediaHook : public MediaHook {
                 }
                 r["automatic_view"] = auto_view;
             }
-            spdlog::warn(
+            spdlog::debug(
                 "RodeoMediaHook::colour_params path={} show={} seq={} shot={} "
                 "ocio_config={} override_view={} automatic_view={} is_baked={}",
                 path,
@@ -454,7 +454,7 @@ class RodeoMediaHook : public MediaHook {
             // No show context - use raw passthrough
             r["ocio_config"]   = "__raw__";
             r["working_space"] = "raw";
-            spdlog::warn(
+            spdlog::debug(
                 "RodeoMediaHook::colour_params path={} - no show found, using raw passthrough",
                 path);
         }
