@@ -1,0 +1,12 @@
+find_package(OpenColorIO CONFIG)
+
+SET(LINK_DEPS
+	xstudio::media_hook
+	xstudio::utility
+	xstudio::module
+	OpenColorIO::OpenColorIO
+)
+
+create_plugin_with_alias(media_hook_rodeo xstudio::media_hook::rdohook ${XSTUDIO_GLOBAL_VERSION} "${LINK_DEPS}")
+
+add_preference(plugin_rodeo_media_hook.json ${CMAKE_CURRENT_SOURCE_DIR} media_hook_rodeo)
