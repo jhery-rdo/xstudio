@@ -1,0 +1,30 @@
+{
+	"plugin": {
+		"conformer": {
+			"rodeo": {
+				"reuse_media": {
+					"context": [
+						"PLUGIN"
+					],
+					"datatype": "bool",
+					"default_value": true,
+					"description": "Reuse existing media when conforming, based on ShotGrid version ID.",
+					"path": "/plugin/conformer/rodeo/reuse_media",
+					"value": true,
+					"category": "RodeoFX"
+				},
+				"purge_sequence_on_import": {
+					"context": [
+						"PLUGIN"
+					],
+					"datatype": "bool",
+					"default_value": false,
+					"description": "Purge additional tracks when importing sequences.",
+					"path": "/plugin/conformer/rodeo/purge_sequence_on_import",
+					"value": false,
+					"category": "RodeoFX"
+				}
+			}
+		}
+	}
+}
