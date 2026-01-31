@@ -36,6 +36,60 @@ Item{
         }
 	}
 
+    // Hybrid conform: Access Python RDO Conform plugin for ShotGrid queries
+    XsModuleData {
+        id: rdoConformMod
+        modelDataName: "RDO Conform"
+    }
+    XsAttributeValue {
+        id: conformRequestAttr
+        attributeTitle: "Conform Request"
+        model: rdoConformMod
+    }
+
+    // Helper to check if task should be routed to Python plugin
+    function isRodeoTask(task) {
+        return task.startsWith("Rodeo: ")
+    }
+
+    // Parse Rodeo task name to extract department and status
+    function parseRodeoTask(task) {
+        // "Rodeo: Comp: Latest" -> {department: "Comp", status: ["all"]}
+        // "Rodeo: Comp: Delivered" -> {department: "Comp", status: ["dlvr", "cfin"]}
+        let name = task.replace("Rodeo: ", "")
+        let parts = name.split(": ")
+        let department = parts.length > 0 ? parts[0] : ""
+        let statusKeyword = parts.length > 1 ? parts[1].toLowerCase() : "latest"
+
+        let statusMap = {
+            "latest": ["all"],
+            "delivered": ["dlvr", "cfin"],
+            "pushed": ["push", "apr"],
+            "pending": ["pdlvr"],
+            "approved": ["apr"]
+        }
+
+        return {
+            department: department,
+            status_list: statusMap[statusKeyword] || ["all"],
+            track_name: name
+        }
+    }
+
+    // Trigger Python conform plugin
+    function triggerRodeoConform(task) {
+        let params = parseRodeoTask(task)
+        let request = {
+            action: "auto_conform",
+            request_id: Date.now().toString(),
+            department: params.department,
+            status_list: params.status_list,
+            track_name: params.track_name
+        }
+        console.log("XsConformTool: Triggering Rodeo conform:", JSON.stringify(request))
+        conformRequestAttr.value = JSON.stringify(request)
+    }
+
 
    Component.onCompleted: {
         // make sure the 'Add' sub-menu appears in the correct place
@@ -158,6 +212,14 @@ Item{
     }
 
     function autoConformSelectionTimeline(task, src, dst) {
+        // Check if this is a Rodeo task - route to Python plugin
+        if (isRodeoTask(task)) {
+            console.log("XsConformTool: Routing Rodeo task to Python plugin:", task)
+            triggerRodeoConform(task)
+            return
+        }
+
+        // Standard conform flow for non-Rodeo tasks
         // purge dst and clone src into it.
         if(theSessionData.replaceTimelineTrack(src, dst)){
             dst.model.set(dst, task, "nameRole")
