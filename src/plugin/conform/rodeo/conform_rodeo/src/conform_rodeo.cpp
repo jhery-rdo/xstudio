@@ -311,61 +311,22 @@ class RodeoConformActor : public caf::event_based_actor {
                 return rp;
             },
 
-            // Find sequences related to media - extract from Rodeo metadata
+            // Find sequences related to media
+            // NOTE: Disabled for hybrid approach - Python plugin handles auto-conform
+            // directly without needing OTIO-based sequence lookup
             [=](conform_atom,
                 const std::vector<std::pair<utility::UuidActor, utility::JsonStore>> &media)
                 -> result<std::vector<
                     std::optional<std::tuple<std::string, caf::uri, utility::JsonStore>>>> {
+                // Return empty results - sequence lookup not needed for Rodeo workflow
                 auto result = std::vector<
                     std::optional<std::tuple<std::string, caf::uri, utility::JsonStore>>>();
                 result.reserve(media.size());
-
-                for (const auto &[ua, meta] : media) {
-                    try {
-                        // Extract show and shot from Rodeo metadata
-                        auto show = get_project_name(meta);
-                        auto shot = get_shot_name(meta);
-
-                        if (!show.empty() && !shot.empty()) {
-                            // Extract sequence from shot code (e.g., "206044_0010" -> "206044")
-                            std::string seq = shot;
-                            auto underscore_pos = shot.find('_');
-                            if (underscore_pos != std::string::npos) {
-                                seq = shot.substr(0, underscore_pos);
-                            }
-
-                            // Build sequence name and URI
-                            std::string seq_name = show + "_" + seq;
-                            // Use a file URI pattern for the sequence
-                            auto seq_uri = caf::make_uri("xstudio://sequence/" + show + "/" + seq);
-
-                            if (seq_uri) {
-                                // Include metadata for the sequence
-                                auto seq_meta = JsonStore();
-                                seq_meta["show"] = show;
-                                seq_meta["sequence"] = seq;
-                                seq_meta["shot"] = shot;
-
-                                spdlog::debug(
-                                    "RodeoConform: Found sequence {} for media",
-                                    seq_name);
-                                result.push_back(
-                                    std::make_tuple(seq_name, *seq_uri, seq_meta));
-                                continue;
-                            }
-                        }
-                    } catch (const std::exception &err) {
-                        spdlog::debug(
-                            "RodeoConform: Error extracting sequence from media: {}",
-                            err.what());
-                    }
-                    // No sequence found for this media
+                for (size_t i = 0; i < media.size(); ++i) {
                     result.push_back({});
                 }
-
-                spdlog::info(
-                    "RodeoConform: conform_find_timeline returned {} results for {} media",
-                    result.size(), media.size());
+                spdlog::debug(
+                    "RodeoConform: conform_find_timeline returning empty (Python handles conform)");
                 return result;
             },
 
