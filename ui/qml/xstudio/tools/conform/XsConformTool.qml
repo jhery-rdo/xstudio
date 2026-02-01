@@ -212,14 +212,12 @@ Item{
     }
 
     function autoConformSelectionTimeline(task, src, dst) {
-        // Check if this is a Rodeo task - route to Python plugin
-        if (isRodeoTask(task)) {
-            console.log("XsConformTool: Routing Rodeo task to Python plugin:", task)
-            triggerRodeoConform(task)
-            return
-        }
+        // NOTE: Rodeo tasks are now handled by the C++ Smart Conform Engine
+        // which queries the Python data source for ShotGrid versions.
+        // The C++ engine handles: timeline parsing, batch queries, media creation.
+        // Python only handles: ShotGrid API calls via RDOSHOTGRID data source.
 
-        // Standard conform flow for non-Rodeo tasks
+        // Standard conform flow - handles both Rodeo and non-Rodeo tasks
         // purge dst and clone src into it.
         if(theSessionData.replaceTimelineTrack(src, dst)){
             dst.model.set(dst, task, "nameRole")

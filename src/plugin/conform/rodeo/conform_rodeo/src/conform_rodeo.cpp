@@ -1,38 +1,47 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * Rodeo Conform Plugin for xStudio
+ * Rodeo Smart Conform Engine for xStudio
  *
- * Provides conforming functionality for RodeoFX timelines:
- * - Auto-conform from presets (e.g., "Comp: Latest", "Anim: Pushed")
- * - Match media to clips by show + shot code
- * - Prepare timeline with conform track structure
+ * This plugin implements a high-performance conform engine for RodeoFX timelines:
+ * - C++ handles performance-critical work: timeline parsing, batch queries, clip creation
+ * - Python data source handles ShotGrid API calls
  *
- * This plugin reads presets from /core/conform/presets and registers
- * tasks that appear in the Replace/Compare menus in xStudio.
+ * Architecture:
+ * 1. C++ parses timeline OTIO → extracts shot structure
+ * 2. C++ deduplicates shot codes → builds batch query
+ * 3. C++ sends single request to Python data source (RDOSHOTGRID)
+ * 4. Python executes ShotGrid query → returns versions_by_shot
+ * 5. C++ creates clips with metadata and populates track
  *
- * Metadata paths used:
- *   /shotgrid/shot_code       - Shot code (e.g., "206044_0010")
- *   /shotgrid/project_code    - Project code (e.g., "drb")
- *   /shotgrid/version_id      - ShotGrid version ID
- *   /shotgrid/department      - Department (e.g., "Comp")
- *   /shotgrid/status          - Status (e.g., "dlvr")
+ * Request/Response format:
+ *   C++ → Python: {operation, project_code, shot_codes[], department, status_list}
+ *   Python → C++: {success, versions_by_shot: {shot → version_data}, missing_shots[]}
  */
 
 #include <caf/actor_registry.hpp>
 #include <caf/policy/select_all.hpp>
 #include <regex>
 #include <algorithm>
+#include <set>
+#include <filesystem>
 
 #include "xstudio/conform/conformer.hpp"
 #include "xstudio/utility/helpers.hpp"
 #include "xstudio/utility/string_helpers.hpp"
 #include "xstudio/utility/json_store.hpp"
 #include "xstudio/timeline/track_actor.hpp"
+#include "xstudio/timeline/gap_actor.hpp"
+#include "xstudio/timeline/clip_actor.hpp"
+#include "xstudio/media/media_actor.hpp"
+#include "xstudio/data_source/data_source.hpp"
+#include "xstudio/json_store/json_store_helper.hpp"
 
 using namespace xstudio;
 using namespace xstudio::conform;
 using namespace xstudio::utility;
 using namespace std::chrono_literals;
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -132,7 +141,43 @@ std::string extract_show_from_timeline_name(const std::string &timeline_name) {
     return timeline_name;
 }
 
+/**
+ * Extract shot code from clip name using regex patterns.
+ * Handles formats like: 206044_0010.comp.v7, 206044_0010_comp_v001
+ */
+std::string extract_shot_from_clip_name(const std::string &name) {
+    if (name.empty())
+        return "";
+
+    // Pattern: SEQ_SHOT (e.g., 206044_0010)
+    static const std::regex seq_shot_re(R"(^(\d{6}_\d{4}))");
+    std::smatch match;
+    if (std::regex_search(name, match, seq_shot_re)) {
+        return match[1].str();
+    }
+
+    // Pattern: seq###_shot#### or similar
+    static const std::regex generic_shot_re(R"(^([a-zA-Z]+\d+_[a-zA-Z]*\d+))");
+    if (std::regex_search(name, match, generic_shot_re)) {
+        return match[1].str();
+    }
+
+    return "";
+}
+
 } // anonymous namespace
+
+/**
+ * Shot structure item - represents a clip or gap in the timeline
+ */
+struct ShotStructureItem {
+    enum Type { CLIP, GAP };
+    Type type;
+    std::string shot_code;
+    FrameRange source_range;
+    std::string clip_name;
+    Uuid original_clip_uuid;  // For tracking original clip
+};
 
 /**
  * Preset structure for conform operations
@@ -262,7 +307,7 @@ class RodeoConform : public Conformer {
 };
 
 /**
- * RodeoConformActor - CAF actor wrapping RodeoConform.
+ * RodeoConformActor - CAF actor wrapping RodeoConform with smart engine.
  */
 template <typename T>
 class RodeoConformActor : public caf::event_based_actor {
@@ -270,7 +315,7 @@ class RodeoConformActor : public caf::event_based_actor {
     RodeoConformActor(
         caf::actor_config &cfg, const utility::JsonStore &prefs = utility::JsonStore())
         : caf::event_based_actor(cfg), conform_(prefs) {
-        spdlog::info("RodeoConformActor created");
+        spdlog::info("RodeoConformActor (smart engine) created");
         utility::print_on_exit(this, "RodeoConformActor");
 
         // Join global store broadcast to receive preference updates
@@ -292,10 +337,11 @@ class RodeoConformActor : public caf::event_based_actor {
             },
 
             // Task-based conform (e.g., "Rodeo: Comp: Latest")
+            // This is the SMART ENGINE entry point
             [=](conform_atom,
                 const std::string &conform_task,
                 const ConformRequest &crequest) -> result<ConformReply> {
-                spdlog::info("RodeoConformActor: conform_task_request for '{}'", conform_task);
+                spdlog::info("RodeoConformActor: Smart engine conform_task_request for '{}'", conform_task);
                 auto rp = make_response_promise<ConformReply>();
                 conform_task_request(rp, conform_task, crequest);
                 return rp;
@@ -312,8 +358,7 @@ class RodeoConformActor : public caf::event_based_actor {
             },
 
             // Find sequences related to media
-            // NOTE: Disabled for hybrid approach - Python plugin handles auto-conform
-            // directly without needing OTIO-based sequence lookup
+            // NOTE: Disabled for smart engine - we handle everything in C++
             [=](conform_atom,
                 const std::vector<std::pair<utility::UuidActor, utility::JsonStore>> &media)
                 -> result<std::vector<
@@ -326,7 +371,7 @@ class RodeoConformActor : public caf::event_based_actor {
                     result.push_back({});
                 }
                 spdlog::debug(
-                    "RodeoConform: conform_find_timeline returning empty (Python handles conform)");
+                    "RodeoConform: conform_find_timeline returning empty (smart engine handles conform)");
                 return result;
             },
 
@@ -373,8 +418,358 @@ class RodeoConformActor : public caf::event_based_actor {
     caf::behavior make_behavior() override { return behavior_; }
 
   private:
+    // ========================================================================
+    // SMART ENGINE METHODS
+    // ========================================================================
+
     /**
-     * Handle task-based conform request.
+     * Extract shot structure from timeline conform track.
+     *
+     * Walks through the conform track and extracts:
+     * - Shot codes from clip names/metadata
+     * - Source ranges for proper timing
+     * - Gap positions for track structure
+     */
+    std::vector<ShotStructureItem> extract_shot_structure(
+        const timeline::Item &timeline_item,
+        const Uuid &conform_track_uuid,
+        const std::map<Uuid, JsonStore> &metadata) {
+
+        std::vector<ShotStructureItem> structure;
+
+        // Find the conform track
+        auto tracks = timeline_item.find_all_items(timeline::IT_VIDEO_TRACK);
+        const timeline::Item *conform_track = nullptr;
+
+        for (const auto &track_ref : tracks) {
+            if (track_ref.get().uuid() == conform_track_uuid) {
+                conform_track = &track_ref.get();
+                break;
+            }
+        }
+
+        if (!conform_track) {
+            spdlog::warn("RodeoConform: Could not find conform track {}", to_string(conform_track_uuid));
+            return structure;
+        }
+
+        // Extract structure from conform track children
+        for (const auto &item : conform_track->children()) {
+            ShotStructureItem si;
+
+            if (item.item_type() == timeline::IT_GAP) {
+                si.type = ShotStructureItem::GAP;
+                si.shot_code = "";
+                si.clip_name = "Gap";
+            } else if (item.item_type() == timeline::IT_CLIP) {
+                si.type = ShotStructureItem::CLIP;
+                si.clip_name = item.name();
+                si.original_clip_uuid = item.uuid();
+
+                // Try to get shot code from metadata first
+                auto shot_code = std::string();
+                if (metadata.count(item.uuid())) {
+                    shot_code = get_shot_name(metadata.at(item.uuid()));
+                }
+
+                // Fallback: parse from clip name
+                if (shot_code.empty()) {
+                    shot_code = extract_shot_from_clip_name(item.name());
+                }
+
+                // Last resort: use clip name if it looks like a shot
+                if (shot_code.empty()) {
+                    static const std::regex valid_shot_re(R"(^[a-zA-Z0-9_]+$)");
+                    if (std::regex_match(item.name(), valid_shot_re)) {
+                        shot_code = item.name();
+                    }
+                }
+
+                si.shot_code = shot_code;
+            } else {
+                continue;  // Skip other item types
+            }
+
+            // Copy the source range
+            if (item.active_range()) {
+                si.source_range = *item.active_range();
+            } else {
+                si.source_range = item.trimmed_range();
+            }
+
+            structure.push_back(si);
+        }
+
+        spdlog::info("RodeoConform: Extracted {} items from conform track", structure.size());
+        return structure;
+    }
+
+    /**
+     * Deduplicate shot codes from structure.
+     */
+    std::vector<std::string> deduplicate_shots(const std::vector<ShotStructureItem> &structure) {
+        std::set<std::string> unique_shots;
+        for (const auto &item : structure) {
+            if (item.type == ShotStructureItem::CLIP && !item.shot_code.empty()) {
+                unique_shots.insert(item.shot_code);
+            }
+        }
+        return std::vector<std::string>(unique_shots.begin(), unique_shots.end());
+    }
+
+    /**
+     * Build batch query JSON for Python data source.
+     */
+    JsonStore build_batch_query(
+        const std::string &project_code,
+        const std::vector<std::string> &shot_codes,
+        const ConformPreset &preset) {
+
+        auto query = R"({
+            "operation": "BatchQueryVersions",
+            "project_code": "",
+            "shot_codes": [],
+            "department": "",
+            "status_list": []
+        })"_json;
+
+        query["project_code"] = project_code;
+        query["shot_codes"] = shot_codes;
+        query["department"] = preset.department;
+        query["status_list"] = preset.status_list;
+
+        return query;
+    }
+
+    /**
+     * Registry name for the Rodeo ShotGrid data source.
+     */
+    static constexpr const char* RDOSHOTGRID_REGISTRY = "RDOSHOTGRID";
+
+    /**
+     * Get the Rodeo ShotGrid data source actor from registry.
+     * The data source is a C++ bridge that communicates with the Python plugin.
+     */
+    caf::actor get_data_source() {
+        if (!data_source_) {
+            spdlog::info("RodeoConformActor: Looking up '{}' data source in registry", RDOSHOTGRID_REGISTRY);
+            data_source_ = system().registry().template get<caf::actor>(RDOSHOTGRID_REGISTRY);
+            if (data_source_) {
+                spdlog::info("RodeoConformActor: Found RDOSHOTGRID data source");
+            } else {
+                spdlog::warn("RodeoConformActor: RDOSHOTGRID data source NOT found in registry");
+            }
+        }
+        return data_source_;
+    }
+
+    /**
+     * Send batch query to the Python data source and process response.
+     */
+    void send_batch_query(
+        caf::typed_response_promise<ConformReply> rp,
+        const JsonStore &query,
+        const ConformRequest &crequest,
+        const std::vector<ShotStructureItem> &structure,
+        const ConformPreset &preset) {
+
+        auto data_source = get_data_source();
+        if (!data_source) {
+            spdlog::warn("RodeoConformActor: RDOSHOTGRID data source not found, falling back to basic conform");
+            conform_request(rp, crequest);
+            return;
+        }
+
+        spdlog::info("RodeoConformActor: Sending batch query to RDOSHOTGRID data source");
+
+        // Store shared state for the callback
+        auto structure_ptr = std::make_shared<std::vector<ShotStructureItem>>(structure);
+        auto preset_ptr = std::make_shared<ConformPreset>(preset);
+        auto crequest_ptr = std::make_shared<ConformRequest>(crequest);
+
+        mail(data_source::get_data_atom_v, query)
+            .request(data_source, std::chrono::seconds(60))
+            .then(
+                [=, this](const JsonStore &response) mutable {
+                    spdlog::info("RodeoConformActor: Received response from data source");
+                    process_batch_response(rp, response, *crequest_ptr, *structure_ptr, *preset_ptr);
+                },
+                [=, this](const caf::error &err) mutable {
+                    spdlog::warn("RodeoConformActor: Data source error: {}", to_string(err));
+                    // Fall back to basic conform on error
+                    conform_request(rp, *crequest_ptr);
+                });
+    }
+
+    /**
+     * Process batch response from Python data source.
+     * Creates media actors and builds ConformReply for track population.
+     */
+    void process_batch_response(
+        caf::typed_response_promise<ConformReply> rp,
+        const JsonStore &response,
+        const ConformRequest &crequest,
+        const std::vector<ShotStructureItem> &structure,
+        const ConformPreset &preset) {
+
+        try {
+            // Check for error response
+            if (!response.value("success", false)) {
+                auto error_msg = response.value("error", std::string("Unknown error"));
+                spdlog::warn("RodeoConformActor: Batch query failed: {}", error_msg);
+                conform_request(rp, crequest);
+                return;
+            }
+
+            // Get versions_by_shot from response
+            if (!response.contains("versions_by_shot")) {
+                spdlog::warn("RodeoConformActor: Response missing versions_by_shot");
+                conform_request(rp, crequest);
+                return;
+            }
+
+            auto versions_by_shot = response.at("versions_by_shot");
+            auto missing_shots = response.value("missing_shots", std::vector<std::string>());
+
+            spdlog::info(
+                "RodeoConformActor: Got {} versions, {} missing shots",
+                versions_by_shot.size(),
+                missing_shots.size());
+
+            // Log missing shots
+            for (const auto &shot : missing_shots) {
+                spdlog::debug("RodeoConformActor: Missing shot: {}", shot);
+            }
+
+            // Create media actors from version paths
+            std::map<std::string, UuidActor> media_by_shot;
+            auto playlist = crequest.container_.actor();
+
+            for (const auto &[shot, version_data] : versions_by_shot.items()) {
+                auto version_code = version_data.value("version_code", std::string());
+                auto path_to_movie = version_data.value("sg_path_to_movie", std::string());
+                auto path_to_frames = version_data.value("sg_path_to_frames", std::string());
+
+                // Prefer movie path, fallback to frames
+                auto media_path = path_to_movie.empty() ? path_to_frames : path_to_movie;
+
+                if (media_path.empty()) {
+                    spdlog::debug("RodeoConformActor: No path for shot {}", shot);
+                    continue;
+                }
+
+                // Check if file exists
+                if (!fs::exists(media_path)) {
+                    spdlog::debug("RodeoConformActor: Path not found for shot {}: {}", shot, media_path);
+                    continue;
+                }
+
+                try {
+                    // Create media from path
+                    auto uri = posix_path_to_uri(media_path);
+                    auto media_uuid = Uuid::generate();
+                    auto source_uuid = Uuid::generate();
+
+                    // Get file extension for source name
+                    auto ext = ltrim_char(
+                        to_upper(fs::path(media_path).extension().string()), '.');
+
+                    // Create media source actor
+                    auto source = spawn<media::MediaSourceActor>(
+                        ext.empty() ? "UNKNOWN" : ext,
+                        uri,
+                        FrameRate(timebase::k_flicks_24fps),
+                        source_uuid);
+
+                    // Create media actor wrapping the source
+                    auto media_actor = spawn<media::MediaActor>(
+                        version_code,
+                        media_uuid,
+                        UuidActorVector({UuidActor(source_uuid, source)}));
+
+                    // Build ShotGrid metadata for the media
+                    auto sg_meta = R"({"metadata": {"shotgrid": {}}})"_json;
+                    sg_meta["metadata"]["shotgrid"]["version_id"] = version_data.value("version_id", 0);
+                    sg_meta["metadata"]["shotgrid"]["version_code"] = version_code;
+                    sg_meta["metadata"]["shotgrid"]["shot_code"] = shot;
+                    sg_meta["metadata"]["shotgrid"]["shot_id"] = version_data.value("shot_id", 0);
+                    sg_meta["metadata"]["shotgrid"]["sg_department"] = version_data.value("sg_department", "");
+                    sg_meta["metadata"]["shotgrid"]["sg_status_list"] = version_data.value("sg_status_list", "");
+
+                    // Set metadata on media actor
+                    anon_mail(json_store::set_json_atom_v, JsonStore(sg_meta)).send(media_actor);
+
+                    media_by_shot[shot] = UuidActor(media_uuid, media_actor);
+
+                    spdlog::info(
+                        "RodeoConformActor: Created media for shot {}: {} ({})",
+                        shot, version_code, media_path);
+
+                } catch (const std::exception &err) {
+                    spdlog::warn(
+                        "RodeoConformActor: Failed to create media for shot {}: {}",
+                        shot, err.what());
+                }
+            }
+
+            spdlog::info(
+                "RodeoConformActor: Created {} media actors for {} structure items",
+                media_by_shot.size(), structure.size());
+
+            // Build ConformReply matching clips to media
+            auto creply = ConformReply(crequest);
+
+            // For each item in the request, find matching media
+            for (const auto &req_item : crequest.items_) {
+                auto shot_code = std::string();
+
+                // Try to get shot code from clip metadata
+                if (crequest.metadata_.count(req_item.item_.uuid())) {
+                    shot_code = get_shot_name(crequest.metadata_.at(req_item.item_.uuid()));
+                }
+
+                // Fallback: parse from clip name
+                if (shot_code.empty() && !req_item.clip_.name().empty()) {
+                    shot_code = extract_shot_from_clip_name(req_item.clip_.name());
+                }
+
+                if (!shot_code.empty() && media_by_shot.count(shot_code)) {
+                    // Found matching media - add to reply
+                    auto ritems = std::vector<ConformReplyItem>();
+                    ritems.emplace_back(std::make_tuple(media_by_shot.at(shot_code)));
+                    creply.items_.push_back(ritems);
+                    spdlog::debug("RodeoConformActor: Matched clip {} to shot {}", req_item.clip_.name(), shot_code);
+                } else {
+                    // No match - return empty
+                    creply.items_.push_back({});
+                    spdlog::debug("RodeoConformActor: No match for clip {} (shot={})", req_item.clip_.name(), shot_code);
+                }
+            }
+
+            // Set operations to tell conform system to create and insert media
+            creply.operations_["create_media"] = true;
+            creply.operations_["insert_media"] = true;
+
+            spdlog::info(
+                "RodeoConformActor: Delivering ConformReply with {} items",
+                creply.items_.size());
+
+            rp.deliver(creply);
+
+        } catch (const std::exception &err) {
+            spdlog::warn("RodeoConformActor: Error processing batch response: {}", err.what());
+            conform_request(rp, crequest);
+        }
+    }
+
+    /**
+     * SMART ENGINE: Handle task-based conform request.
+     *
+     * This is the main entry point for the smart engine:
+     * 1. Extract shot structure from timeline
+     * 2. Build batch query
+     * 3. Send to Python data source
+     * 4. Process response and populate track
      */
     void conform_task_request(
         caf::typed_response_promise<ConformReply> rp,
@@ -383,7 +778,7 @@ class RodeoConformActor : public caf::event_based_actor {
 
         try {
             spdlog::info(
-                "RodeoConformActor: Processing task '{}' with {} items",
+                "RodeoConformActor: Smart engine processing task '{}' with {} items",
                 conform_task,
                 crequest.items_.size());
 
@@ -406,9 +801,134 @@ class RodeoConformActor : public caf::event_based_actor {
                 preset->department.empty() ? "any" : preset->department,
                 preset->status_list.empty() ? "any" : preset->status_list[0]);
 
-            // For now, just do basic matching and let the caller know we processed it
-            // In a full implementation, we would query ShotGrid here
-            conform_request(rp, crequest);
+            // Check if we have template tracks (conform track structure)
+            spdlog::info(
+                "RodeoConformActor: template_tracks={}, metadata entries={}",
+                crequest.template_tracks_.size(),
+                crequest.metadata_.size());
+
+            if (crequest.template_tracks_.empty()) {
+                spdlog::warn("RodeoConformActor: No template tracks, falling back to basic conform");
+                conform_request(rp, crequest);
+                return;
+            }
+
+            // Get the conform track UUID from the first template track
+            const auto &template_track = crequest.template_tracks_.at(0);
+            auto conform_track_uuid = template_track.uuid();
+            spdlog::info(
+                "RodeoConformActor: Template track '{}' with {} children",
+                template_track.name(),
+                template_track.children().size());
+
+            // We need to get the full timeline item to extract project code
+            // For now, try to get project from the first item's metadata
+            auto project_code = std::string();
+            if (!crequest.items_.empty()) {
+                auto item_uuid = crequest.items_.at(0).item_.uuid();
+                spdlog::debug("RodeoConformActor: First item UUID: {}", to_string(item_uuid));
+                if (crequest.metadata_.count(item_uuid)) {
+                    project_code = get_project_name(crequest.metadata_.at(item_uuid));
+                    spdlog::debug("RodeoConformActor: Project from first item: '{}'", project_code);
+                } else {
+                    spdlog::debug("RodeoConformActor: No metadata for first item");
+                }
+            }
+
+            // Fallback: try to extract from any metadata
+            if (project_code.empty()) {
+                spdlog::debug("RodeoConformActor: Searching all {} metadata entries for project", crequest.metadata_.size());
+                for (const auto &[uuid, meta] : crequest.metadata_) {
+                    project_code = get_project_name(meta);
+                    if (!project_code.empty()) {
+                        spdlog::debug("RodeoConformActor: Found project '{}' in metadata {}", project_code, to_string(uuid));
+                        break;
+                    }
+                }
+            }
+
+            if (project_code.empty()) {
+                spdlog::warn("RodeoConformActor: Could not determine project code from {} metadata entries", crequest.metadata_.size());
+                conform_request(rp, crequest);
+                return;
+            }
+
+            spdlog::info("RodeoConformActor: Project code: {}", project_code);
+
+            // Extract shot structure from the template track
+            // We need to build a temporary timeline item to use extract_shot_structure
+            // For now, use the clips from template_tracks_
+            std::vector<ShotStructureItem> structure;
+            auto clips = template_track.find_all_items(timeline::IT_CLIP);
+
+            for (const auto &clip_ref : clips) {
+                const auto &clip = clip_ref.get();
+                ShotStructureItem si;
+                si.type = ShotStructureItem::CLIP;
+                si.clip_name = clip.name();
+                si.original_clip_uuid = clip.uuid();
+
+                // Get shot code from metadata or clip name
+                auto shot_code = std::string();
+                if (crequest.metadata_.count(clip.uuid())) {
+                    shot_code = get_shot_name(crequest.metadata_.at(clip.uuid()));
+                }
+                if (shot_code.empty()) {
+                    shot_code = extract_shot_from_clip_name(clip.name());
+                }
+                if (shot_code.empty() && !clip.name().empty()) {
+                    static const std::regex valid_shot_re(R"(^[a-zA-Z0-9_]+$)");
+                    if (std::regex_match(clip.name(), valid_shot_re)) {
+                        shot_code = clip.name();
+                    }
+                }
+
+                si.shot_code = shot_code;
+
+                if (clip.active_range()) {
+                    si.source_range = *clip.active_range();
+                } else {
+                    si.source_range = clip.trimmed_range();
+                }
+
+                structure.push_back(si);
+            }
+
+            // Also add gaps
+            auto all_items = template_track.children();
+            for (const auto &item : all_items) {
+                if (item.item_type() == timeline::IT_GAP) {
+                    ShotStructureItem si;
+                    si.type = ShotStructureItem::GAP;
+                    si.shot_code = "";
+                    si.clip_name = "Gap";
+                    if (item.active_range()) {
+                        si.source_range = *item.active_range();
+                    } else {
+                        si.source_range = item.trimmed_range();
+                    }
+                    structure.push_back(si);
+                }
+            }
+
+            spdlog::info("RodeoConformActor: Extracted {} structure items", structure.size());
+
+            // Deduplicate shot codes
+            auto shot_codes = deduplicate_shots(structure);
+            if (shot_codes.empty()) {
+                spdlog::warn("RodeoConformActor: No shot codes found in structure");
+                conform_request(rp, crequest);
+                return;
+            }
+
+            spdlog::info("RodeoConformActor: {} unique shots to query", shot_codes.size());
+
+            // Build batch query
+            auto query = build_batch_query(project_code, shot_codes, *preset);
+            spdlog::info("RodeoConformActor: Built batch query for {} shots", shot_codes.size());
+
+            // Send query to Python data source via the C++ bridge
+            send_batch_query(rp, query, crequest, structure, *preset);
 
         } catch (const std::exception &err) {
             spdlog::warn("RodeoConformActor: conform_task_request error: {}", err.what());
@@ -698,6 +1218,7 @@ class RodeoConformActor : public caf::event_based_actor {
   private:
     caf::behavior behavior_;
     T conform_;
+    caf::actor data_source_;  // Cached data source actor
 };
 
 extern "C" {
@@ -708,7 +1229,7 @@ plugin_manager::PluginFactoryCollection *plugin_factory_collection_ptr() {
                 Uuid("b8c9d0e1-f2a3-4b5c-8d7e-9f0a1b2c3d4e"),
                 "RodeoFX",
                 "xStudio",  // Use "xStudio" as author to auto-enable plugin
-                "RodeoFX Conformer",
-                semver::version("1.0.0"))}));
+                "RodeoFX Smart Conformer",
+                semver::version("2.0.0"))}));
 }
 }
