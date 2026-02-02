@@ -48,7 +48,7 @@ constexpr auto PYTHON_RESPONSE_TIMEOUT = 30s;
  */
 class RdoShotGridDataSource : public caf::event_based_actor {
   public:
-    RdoShotGridDataSource(caf::actor_config &cfg)
+    RdoShotGridDataSource(caf::actor_config &cfg, const JsonStore & = JsonStore())
         : caf::event_based_actor(cfg) {
         spdlog::info("RdoShotGridDataSource bridge created");
         utility::print_on_exit(this, "RdoShotGridDataSource");
@@ -184,9 +184,10 @@ class RdoShotGridDataSource : public caf::event_based_actor {
             request_receive<bool>(
                 *sys,
                 python_plugin,
-                module::set_attribute_value_atom_v,
+                module::change_attribute_value_atom_v,
                 std::string("SG Request"),
-                request_json);
+                JsonStore(request_json),
+                true);
 
             // Poll for response on "SG Response" attribute
             auto start_time = std::chrono::steady_clock::now();
@@ -202,12 +203,13 @@ class RdoShotGridDataSource : public caf::event_based_actor {
 
                 // Try to get the response attribute
                 try {
-                    auto response_str = request_receive<std::string>(
+                    auto response_json = request_receive<JsonStore>(
                         *sys,
                         python_plugin,
-                        module::get_attribute_value_atom_v,
+                        module::attribute_value_atom_v,
                         std::string("SG Response"));
 
+                    auto response_str = response_json.get<std::string>();
                     if (!response_str.empty()) {
                         response = JsonStore(nlohmann::json::parse(response_str));
 
@@ -215,9 +217,10 @@ class RdoShotGridDataSource : public caf::event_based_actor {
                         request_receive<bool>(
                             *sys,
                             python_plugin,
-                            module::set_attribute_value_atom_v,
+                            module::change_attribute_value_atom_v,
                             std::string("SG Response"),
-                            std::string(""));
+                            JsonStore(""),
+                            true);
 
                         break;
                     }
