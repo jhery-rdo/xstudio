@@ -6,13 +6,15 @@
 #include <cstdlib>
 
 #include <spdlog/spdlog.h>
+#include <OpenColorIO/OpenColorIO.h>
 
 #include "xstudio/media_hook/media_hook.hpp"
 #include "xstudio/utility/helpers.hpp"
 #include "xstudio/utility/string_helpers.hpp"
 #include "xstudio/utility/json_store.hpp"
 
-namespace fs = std::filesystem;
+namespace fs   = std::filesystem;
+namespace OCIO = OCIO_NAMESPACE;
 
 using namespace xstudio;
 using namespace xstudio::media_hook;
@@ -449,24 +451,30 @@ class RodeoMediaHook : public MediaHook {
             r["working_space"] = "scene_linear";
 
             // Set input colorspace based on media type
-            // Uses colorspaces defined in the show's OCIO config file_rules
+            // Uses OCIO file_rules from the config to determine colorspace
             std::string override_view;
             bool needs_raw_input = false;
 
             // Set automatic view and input colorspace based on media type
             std::string auto_view = "(none)";
             if (is_baked_media(path)) {
-                // MOVs and stills - use passthrough colorspace from config
-                // Matches file_rules: Movies -> "Movie - Passthrough", Stills -> "sRGB - Display"
-                std::string ext = fs::path(path).extension().string();
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-                if (movie_ext_.find(ext) != movie_ext_.end()) {
-                    r["input_colorspace"] = "Movie - Passthrough";
-                } else if (still_ext_.find(ext) != still_ext_.end()) {
-                    r["input_colorspace"] = "sRGB - Display";
-                }
+                // MOVs and stills - use OCIO file_rules to get colorspace from config
                 needs_raw_input = true;
+                try {
+                    auto config = OCIO::Config::CreateFromFile(ocio_config.c_str());
+                    const char *cs = config->getColorSpaceFromFilepath(path.c_str());
+                    if (cs && *cs) {
+                        r["input_colorspace"] = cs;
+                        spdlog::debug(
+                            "RodeoMediaHook: OCIO file_rules matched '{}' for path: {}",
+                            cs,
+                            path);
+                    }
+                } catch (const std::exception &e) {
+                    spdlog::warn(
+                        "RodeoMediaHook: Failed to get colorspace from OCIO file_rules: {}",
+                        e.what());
+                }
             } else if (is_lineup_exr(path)) {
                 // Lineup uses specific input colorspace, let config drive the view
                 r["input_colorspace"] = "rdo-nwb";
