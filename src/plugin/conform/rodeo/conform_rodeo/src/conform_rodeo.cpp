@@ -807,23 +807,78 @@ class RodeoConformActor : public caf::event_based_actor {
                 crequest.template_tracks_.size(),
                 crequest.metadata_.size());
 
+            // If template_tracks_ is empty, try to detect conform track from timeline
+            timeline::Item template_track(timeline::IT_NONE);
+
             if (crequest.template_tracks_.empty()) {
-                spdlog::warn("RodeoConformActor: No template tracks, falling back to basic conform");
-                conform_request(rp, crequest);
-                return;
+                spdlog::info("RodeoConformActor: No template tracks provided, attempting to detect conform track from timeline");
+
+                // Try to get the conform track from the timeline's properties
+                scoped_actor sys{system()};
+                try {
+                    // Get the timeline item from the container
+                    auto timeline_item = request_receive<timeline::Item>(
+                        *sys, crequest.container_.actor(), timeline::item_atom_v);
+
+                    // Check if conform_track_uuid is set in timeline properties
+                    auto tprop = timeline_item.prop();
+                    if (tprop.contains("conform_track_uuid") && !tprop.at("conform_track_uuid").is_null()) {
+                        auto conform_track_uuid = tprop.value("conform_track_uuid", Uuid());
+                        if (!conform_track_uuid.is_null()) {
+                            spdlog::info(
+                                "RodeoConformActor: Found conform_track_uuid in timeline props: {}",
+                                to_string(conform_track_uuid));
+
+                            // Fetch the specific track item
+                            template_track = request_receive<timeline::Item>(
+                                *sys, crequest.container_.actor(), timeline::item_atom_v, conform_track_uuid);
+
+                            spdlog::info(
+                                "RodeoConformActor: Retrieved conform track '{}' with {} children",
+                                template_track.name(),
+                                template_track.children().size());
+                        } else {
+                            spdlog::warn("RodeoConformActor: conform_track_uuid is null");
+                        }
+                    } else {
+                        spdlog::info("RodeoConformActor: No conform_track_uuid in timeline props, searching for 'Conform Track'");
+
+                        // Fallback: look for a track named "Conform Track"
+                        auto video_tracks = timeline_item.find_all_items(timeline::IT_VIDEO_TRACK);
+                        for (const auto &track_ref : video_tracks) {
+                            if (track_ref.get().name() == "Conform Track") {
+                                template_track = track_ref.get();
+                                spdlog::info(
+                                    "RodeoConformActor: Found 'Conform Track' with {} children",
+                                    template_track.children().size());
+                                break;
+                            }
+                        }
+                    }
+                } catch (const std::exception &err) {
+                    spdlog::warn("RodeoConformActor: Error detecting conform track: {}", err.what());
+                }
+
+                if (template_track.item_type() == timeline::IT_NONE) {
+                    spdlog::warn("RodeoConformActor: Could not detect conform track, falling back to basic conform");
+                    conform_request(rp, crequest);
+                    return;
+                }
+            } else {
+                // Use the provided template track
+                template_track = crequest.template_tracks_.at(0);
             }
 
-            // Get the conform track UUID from the first template track
-            const auto &template_track = crequest.template_tracks_.at(0);
             auto conform_track_uuid = template_track.uuid();
             spdlog::info(
                 "RodeoConformActor: Template track '{}' with {} children",
                 template_track.name(),
                 template_track.children().size());
 
-            // We need to get the full timeline item to extract project code
-            // For now, try to get project from the first item's metadata
+            // Try to get project code from various sources
             auto project_code = std::string();
+
+            // 1. Try to get from first item's metadata
             if (!crequest.items_.empty()) {
                 auto item_uuid = crequest.items_.at(0).item_.uuid();
                 spdlog::debug("RodeoConformActor: First item UUID: {}", to_string(item_uuid));
@@ -835,7 +890,7 @@ class RodeoConformActor : public caf::event_based_actor {
                 }
             }
 
-            // Fallback: try to extract from any metadata
+            // 2. Fallback: try to extract from any metadata entry
             if (project_code.empty()) {
                 spdlog::debug("RodeoConformActor: Searching all {} metadata entries for project", crequest.metadata_.size());
                 for (const auto &[uuid, meta] : crequest.metadata_) {
@@ -847,8 +902,57 @@ class RodeoConformActor : public caf::event_based_actor {
                 }
             }
 
+            // 3. Fallback: try to extract from clip metadata in conform track
             if (project_code.empty()) {
-                spdlog::warn("RodeoConformActor: Could not determine project code from {} metadata entries", crequest.metadata_.size());
+                spdlog::debug("RodeoConformActor: Trying to get project from conform track clip metadata");
+                auto clips = template_track.find_all_items(timeline::IT_CLIP);
+                for (const auto &clip_ref : clips) {
+                    auto clip_meta = clip_ref.get().prop();
+                    project_code = get_project_name(clip_meta);
+                    if (!project_code.empty()) {
+                        spdlog::debug("RodeoConformActor: Found project '{}' in clip prop", project_code);
+                        break;
+                    }
+                }
+            }
+
+            // 4. Fallback: try to extract from timeline properties or name
+            if (project_code.empty()) {
+                spdlog::debug("RodeoConformActor: Trying to get project from timeline");
+                scoped_actor sys{system()};
+                try {
+                    auto timeline_item = request_receive<timeline::Item>(
+                        *sys, crequest.container_.actor(), timeline::item_atom_v);
+
+                    // Try timeline path first
+                    static const auto SHOW_REGEX = std::regex(R"(^(?:/rdo)?/shows/([^/]+)/.+$)");
+                    auto timeline_path = timeline_item.prop().value("path", std::string());
+                    if (!timeline_path.empty()) {
+                        std::cmatch m;
+                        auto uri_path = caf::make_uri(timeline_path);
+                        if (uri_path) {
+                            auto posix_path = uri_to_posix_path(*uri_path);
+                            if (std::regex_match(posix_path.c_str(), m, SHOW_REGEX)) {
+                                project_code = m[1];
+                                spdlog::debug("RodeoConformActor: Extracted project '{}' from timeline path", project_code);
+                            }
+                        }
+                    }
+
+                    // Try timeline name
+                    if (project_code.empty()) {
+                        project_code = extract_show_from_timeline_name(timeline_item.name());
+                        if (!project_code.empty()) {
+                            spdlog::debug("RodeoConformActor: Extracted project '{}' from timeline name", project_code);
+                        }
+                    }
+                } catch (const std::exception &err) {
+                    spdlog::debug("RodeoConformActor: Error getting timeline for project: {}", err.what());
+                }
+            }
+
+            if (project_code.empty()) {
+                spdlog::warn("RodeoConformActor: Could not determine project code from any source");
                 conform_request(rp, crequest);
                 return;
             }
