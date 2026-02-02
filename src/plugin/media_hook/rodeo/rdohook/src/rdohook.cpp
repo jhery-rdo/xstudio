@@ -450,57 +450,34 @@ class RodeoMediaHook : public MediaHook {
             // Set working space to scene_linear (standard for EXR workflows)
             r["working_space"] = "scene_linear";
 
-            // Set input colorspace based on media type
-            // Uses OCIO file_rules from the config to determine colorspace
-            std::string override_view;
-            bool needs_raw_input = false;
-
-            // Set automatic view and input colorspace based on media type
-            std::string auto_view = "(none)";
-            if (is_baked_media(path)) {
-                // MOVs and stills - use OCIO file_rules to get colorspace from config
-                needs_raw_input = true;
-                try {
-                    auto config = OCIO::Config::CreateFromFile(ocio_config.c_str());
-                    const char *cs = config->getColorSpaceFromFilepath(path.c_str());
-                    if (cs && *cs) {
-                        r["input_colorspace"] = cs;
-                        spdlog::debug(
-                            "RodeoMediaHook: OCIO file_rules matched '{}' for path: {}",
-                            cs,
-                            path);
-                    }
-                } catch (const std::exception &e) {
-                    spdlog::warn(
-                        "RodeoMediaHook: Failed to get colorspace from OCIO file_rules: {}",
-                        e.what());
+            // Use OCIO file_rules to determine input colorspace for ALL media types
+            // The config's file_rules handle: Stills, Movies, Lineup, Assets, Default
+            std::string input_cs = "(none)";
+            try {
+                auto config = OCIO::Config::CreateFromFile(ocio_config.c_str());
+                const char *cs = config->getColorSpaceFromFilepath(path.c_str());
+                if (cs && *cs) {
+                    r["input_colorspace"] = cs;
+                    input_cs = cs;
+                    spdlog::debug(
+                        "RodeoMediaHook: OCIO file_rules matched '{}' for path: {}",
+                        cs,
+                        path);
                 }
-            } else if (is_lineup_exr(path)) {
-                // Lineup uses specific input colorspace, let config drive the view
-                r["input_colorspace"] = "rdo-nwb";
-            } else if (is_asset(path)) {
-                auto_view = "Neutral-look";
-                r["automatic_view"] = auto_view;
-            } else {
-                // Regular shot EXR
-                auto_view = "Client-look";
-                r["automatic_view"] = auto_view;
+            } catch (const std::exception &e) {
+                spdlog::warn(
+                    "RodeoMediaHook: Failed to get colorspace from OCIO file_rules: {}",
+                    e.what());
             }
-            std::string input_cs = r.contains("input_colorspace")
-                                        ? r["input_colorspace"].get<std::string>()
-                                        : "(none)";
             spdlog::debug(
                 "RodeoMediaHook::colour_params path={} show={} seq={} shot={} "
-                "ocio_config={} override_view={} automatic_view={} input_colorspace={} is_baked={}",
+                "ocio_config={} input_colorspace={}",
                 path,
                 show,
                 seq,
                 shot,
                 ocio_config.empty() ? "(none)" : ocio_config,
-                override_view.empty() ? "(none)" : override_view,
-                auto_view,
-                input_cs,
-                needs_raw_input);
+                input_cs);
         } else {
             // No show context - use raw passthrough
             r["ocio_config"]   = "__raw__";
