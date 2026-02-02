@@ -450,11 +450,9 @@ class RodeoMediaHook : public MediaHook {
             // Set working space to scene_linear (standard for EXR workflows)
             r["working_space"] = "scene_linear";
 
-            // Use OCIO file_rules to determine input colorspace for ALL media types
-            // The config's file_rules handle: Stills, Movies, Lineup, Assets, Default
-            // For raw/data colorspaces, also set raw view for full passthrough
+            // Use OCIO file_rules to determine input colorspace
+            // Config file_rules handle: Stills, Movies, Lineup, Default
             std::string input_cs = "(none)";
-            std::string auto_view = "(none)";
             try {
                 auto config = OCIO::Config::CreateFromFile(ocio_config.c_str());
                 const char *cs = config->getColorSpaceFromFilepath(path.c_str());
@@ -465,16 +463,6 @@ class RodeoMediaHook : public MediaHook {
                         "RodeoMediaHook: OCIO file_rules matched '{}' for path: {}",
                         cs,
                         path);
-
-                    // View selection based on path and colorspace
-                    // Assets use Neutral-look, but only for EXRs (not MOVs/stills)
-                    std::string csName(cs);
-                    bool is_raw = csName.find("Raw") != std::string::npos ||
-                                  csName.find("raw") != std::string::npos;
-                    if (path.find("/assets/") != std::string::npos && !is_raw) {
-                        r["automatic_view"] = "Neutral-look";
-                        auto_view = "Neutral-look";
-                    }
                 }
             } catch (const std::exception &e) {
                 spdlog::warn(
@@ -483,14 +471,13 @@ class RodeoMediaHook : public MediaHook {
             }
             spdlog::debug(
                 "RodeoMediaHook::colour_params path={} show={} seq={} shot={} "
-                "ocio_config={} input_colorspace={} automatic_view={}",
+                "ocio_config={} input_colorspace={}",
                 path,
                 show,
                 seq,
                 shot,
                 ocio_config.empty() ? "(none)" : ocio_config,
-                input_cs,
-                auto_view);
+                input_cs);
         } else {
             // No show context - use raw passthrough
             r["ocio_config"]   = "__raw__";
