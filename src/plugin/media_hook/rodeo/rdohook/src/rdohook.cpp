@@ -68,11 +68,30 @@ class RodeoMediaHook : public MediaHook {
 
             if (should_trim_slate(path)) {
                 auto fr = result.frame_list();
+
+                spdlog::debug(
+                    "RodeoMediaHook::modify_media_reference BEFORE trim: path={} "
+                    "frame_start={} frame_count={} timecode={} start_frame_offset={}",
+                    path,
+                    fr.start(),
+                    fr.count(),
+                    result.timecode().total_frames(),
+                    result.start_frame_offset());
+
                 if (fr.pop_front()) {
                     result.set_frame_list(fr);
                     result.set_timecode(result.timecode() + 1);
                     result.set_start_frame_offset(result.start_frame_offset() - 1);
                     changed = true;
+
+                    spdlog::debug(
+                        "RodeoMediaHook::modify_media_reference AFTER trim: path={} "
+                        "frame_start={} frame_count={} timecode={} start_frame_offset={}",
+                        path,
+                        fr.start(),
+                        fr.count(),
+                        result.timecode().total_frames(),
+                        result.start_frame_offset());
                 }
             }
         }
@@ -400,6 +419,17 @@ class RodeoMediaHook : public MediaHook {
             context["RDO_CURRENT_SHOW"] = show;
         }
 
+        // Debug: log the OCIO context being applied
+        bool is_lineup = is_lineup_exr(path);
+        spdlog::debug(
+            "RodeoMediaHook::colour_params OCIO context: path={} show={} seq={} shot={} "
+            "is_lineup={} (lineup files use rdo-nwb to bypass shot white balance)",
+            path,
+            show.empty() ? "(none)" : show,
+            seq.empty() ? "(none)" : seq,
+            shot.empty() ? "(none)" : shot,
+            is_lineup);
+
         // Only set OCIO config if we have a show
         if (!show.empty()) {
             r["ocio_context"] = context;
@@ -424,24 +454,29 @@ class RodeoMediaHook : public MediaHook {
                 }
             }
 
-            // Set automatic view for EXR files based on type
-            // - Lineup EXR: Client-look (non-wb)
-            // - Asset EXR: Neutral-look
-            // - Shot EXR: Client-look
+            // Set automatic view and input colorspace for EXR files based on type
+            // - Lineup EXR: use rdo-nwb input colorspace (no white balance), no view override
+            // - Asset EXR: Neutral-look view
+            // - Shot EXR: Client-look view
             std::string auto_view = "(none)";
             if (!is_baked_media(path)) {
                 if (is_lineup_exr(path)) {
-                    auto_view = "Client-look (non-wb)";
+                    // Lineup uses specific input colorspace, let config drive the view
+                    r["input_colorspace"] = "rdo-nwb";
                 } else if (is_asset(path)) {
                     auto_view = "Neutral-look";
+                    r["automatic_view"] = auto_view;
                 } else {
                     auto_view = "Client-look";
+                    r["automatic_view"] = auto_view;
                 }
-                r["automatic_view"] = auto_view;
             }
+            std::string input_cs = r.contains("input_colorspace")
+                                        ? r["input_colorspace"].get<std::string>()
+                                        : "(none)";
             spdlog::debug(
                 "RodeoMediaHook::colour_params path={} show={} seq={} shot={} "
-                "ocio_config={} override_view={} automatic_view={} is_baked={}",
+                "ocio_config={} override_view={} automatic_view={} input_colorspace={} is_baked={}",
                 path,
                 show,
                 seq,
@@ -449,6 +484,7 @@ class RodeoMediaHook : public MediaHook {
                 ocio_config.empty() ? "(none)" : ocio_config,
                 override_view.empty() ? "(none)" : override_view,
                 auto_view,
+                input_cs,
                 needs_raw_input);
         } else {
             // No show context - use raw passthrough
