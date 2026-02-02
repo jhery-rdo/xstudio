@@ -448,37 +448,35 @@ class RodeoMediaHook : public MediaHook {
             // Set working space to scene_linear (standard for EXR workflows)
             r["working_space"] = "scene_linear";
 
-            // Detect file type and set appropriate overrides
-            // NOTE: Commented out to let OCIO config handle MOV/stills colorspace
-            // auto [override_view, needs_raw_input] = get_override_view_for_path(path);
-            //
-            // if (!override_view.empty()) {
-            //     r["override_view"] = override_view;
-            //
-            //     if (needs_raw_input) {
-            //         // MOVs and stills use raw input colorspace for true passthrough
-            //         r["input_colorspace"] = "Utility - Raw";
-            //     }
-            // }
+            // Set input colorspace based on media type
+            // Uses colorspaces defined in the show's OCIO config file_rules
             std::string override_view;
             bool needs_raw_input = false;
 
-            // Set automatic view and input colorspace for EXR files based on type
-            // - Lineup EXR: use rdo-nwb input colorspace (no white balance), no view override
-            // - Asset EXR: Neutral-look view
-            // - Shot EXR: Client-look view
+            // Set automatic view and input colorspace based on media type
             std::string auto_view = "(none)";
-            if (!is_baked_media(path)) {
-                if (is_lineup_exr(path)) {
-                    // Lineup uses specific input colorspace, let config drive the view
-                    r["input_colorspace"] = "rdo-nwb";
-                } else if (is_asset(path)) {
-                    auto_view = "Neutral-look";
-                    r["automatic_view"] = auto_view;
-                } else {
-                    auto_view = "Client-look";
-                    r["automatic_view"] = auto_view;
+            if (is_baked_media(path)) {
+                // MOVs and stills - use passthrough colorspace from config
+                // Matches file_rules: Movies -> "Movie - Passthrough", Stills -> "sRGB - Display"
+                std::string ext = fs::path(path).extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+                if (movie_ext_.find(ext) != movie_ext_.end()) {
+                    r["input_colorspace"] = "Movie - Passthrough";
+                } else if (still_ext_.find(ext) != still_ext_.end()) {
+                    r["input_colorspace"] = "sRGB - Display";
                 }
+                needs_raw_input = true;
+            } else if (is_lineup_exr(path)) {
+                // Lineup uses specific input colorspace, let config drive the view
+                r["input_colorspace"] = "rdo-nwb";
+            } else if (is_asset(path)) {
+                auto_view = "Neutral-look";
+                r["automatic_view"] = auto_view;
+            } else {
+                // Regular shot EXR
+                auto_view = "Client-look";
+                r["automatic_view"] = auto_view;
             }
             std::string input_cs = r.contains("input_colorspace")
                                         ? r["input_colorspace"].get<std::string>()
