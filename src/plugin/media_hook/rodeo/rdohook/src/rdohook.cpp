@@ -452,8 +452,9 @@ class RodeoMediaHook : public MediaHook {
 
             // Use OCIO file_rules to determine input colorspace for ALL media types
             // The config's file_rules handle: Stills, Movies, Lineup, Assets, Default
+            // No special view logic needed - raw colorspace for baked content,
+            // scene-linear for EXRs, config drives everything
             std::string input_cs = "(none)";
-            std::string auto_view = "(none)";
             try {
                 auto config = OCIO::Config::CreateFromFile(ocio_config.c_str());
                 const char *cs = config->getColorSpaceFromFilepath(path.c_str());
@@ -464,37 +465,6 @@ class RodeoMediaHook : public MediaHook {
                         "RodeoMediaHook: OCIO file_rules matched '{}' for path: {}",
                         cs,
                         path);
-
-                    // Check colorspace encoding to determine if we need a special view
-                    // Video content (sdr-video/hdr-video) should use Un-tone-mapped view
-                    // to bypass tonemapping since the look is already baked in
-                    auto colorspace = config->getColorSpace(cs);
-                    if (colorspace) {
-                        const char *encoding = colorspace->getEncoding();
-                        if (encoding) {
-                            std::string enc(encoding);
-                            if (enc == "sdr-video" || enc == "hdr-video") {
-                                // Look for Un-tone-mapped view in the config
-                                // This view bypasses tonemapping for display-referred content
-                                const char *defaultDisplay = config->getDefaultDisplay();
-                                if (defaultDisplay) {
-                                    int numViews = config->getNumViews(defaultDisplay);
-                                    for (int i = 0; i < numViews; ++i) {
-                                        const char *viewName = config->getView(defaultDisplay, i);
-                                        if (viewName && std::string(viewName) == "Un-tone-mapped") {
-                                            r["automatic_view"] = "Un-tone-mapped";
-                                            auto_view = "Un-tone-mapped";
-                                            spdlog::debug(
-                                                "RodeoMediaHook: Using Un-tone-mapped view for "
-                                                "{} encoded content",
-                                                enc);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             } catch (const std::exception &e) {
                 spdlog::warn(
@@ -503,14 +473,13 @@ class RodeoMediaHook : public MediaHook {
             }
             spdlog::debug(
                 "RodeoMediaHook::colour_params path={} show={} seq={} shot={} "
-                "ocio_config={} input_colorspace={} automatic_view={}",
+                "ocio_config={} input_colorspace={}",
                 path,
                 show,
                 seq,
                 shot,
                 ocio_config.empty() ? "(none)" : ocio_config,
-                input_cs,
-                auto_view);
+                input_cs);
         } else {
             // No show context - use raw passthrough
             r["ocio_config"]   = "__raw__";
