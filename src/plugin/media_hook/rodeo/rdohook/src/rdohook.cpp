@@ -466,31 +466,10 @@ class RodeoMediaHook : public MediaHook {
                         cs,
                         path);
 
-                    // Query automatic view from viewing_rules based on colorspace encoding
-                    // This is fully config-driven - no hardcoded view names
-                    auto colorspace = config->getColorSpace(cs);
-                    if (colorspace) {
-                        const char *encoding = colorspace->getEncoding();
-                        if (encoding && *encoding) {
-                            const char *defaultDisplay = config->getDefaultDisplay();
-                            if (defaultDisplay) {
-                                // Get views filtered by viewing_rules for this colorspace
-                                // The first view in the list is the preferred view for this encoding
-                                int numViews = config->getNumViews(defaultDisplay, cs);
-                                if (numViews > 0) {
-                                    const char *firstView = config->getView(defaultDisplay, cs, 0);
-                                    if (firstView && *firstView) {
-                                        r["automatic_view"] = firstView;
-                                        auto_view = firstView;
-                                        spdlog::debug(
-                                            "RodeoMediaHook: viewing_rules selected '{}' for "
-                                            "encoding '{}'",
-                                            firstView,
-                                            encoding);
-                                    }
-                                }
-                            }
-                        }
+                    // Simple view selection based on path
+                    if (path.find("/assets/") != std::string::npos) {
+                        r["automatic_view"] = "Neutral-look";
+                        auto_view = "Neutral-look";
                     }
                 }
             } catch (const std::exception &e) {
