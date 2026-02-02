@@ -78,7 +78,13 @@ class RodeoMediaHook : public MediaHook {
                     result.timecode().total_frames(),
                     result.start_frame_offset());
 
-                if (fr.pop_front()) {
+                // Skip trimming if already trimmed (start_frame_offset != 0)
+                if (result.start_frame_offset() != 0) {
+                    spdlog::debug(
+                        "RodeoMediaHook::modify_media_reference SKIP trim: already trimmed "
+                        "(start_frame_offset={})",
+                        result.start_frame_offset());
+                } else if (fr.pop_front()) {
                     result.set_frame_list(fr);
                     result.set_timecode(result.timecode() + 1);
                     result.set_start_frame_offset(result.start_frame_offset() - 1);
@@ -443,16 +449,19 @@ class RodeoMediaHook : public MediaHook {
             r["working_space"] = "scene_linear";
 
             // Detect file type and set appropriate overrides
-            auto [override_view, needs_raw_input] = get_override_view_for_path(path);
-
-            if (!override_view.empty()) {
-                r["override_view"] = override_view;
-
-                if (needs_raw_input) {
-                    // MOVs and stills use raw input colorspace for true passthrough
-                    r["input_colorspace"] = "Utility - Raw";
-                }
-            }
+            // NOTE: Commented out to let OCIO config handle MOV/stills colorspace
+            // auto [override_view, needs_raw_input] = get_override_view_for_path(path);
+            //
+            // if (!override_view.empty()) {
+            //     r["override_view"] = override_view;
+            //
+            //     if (needs_raw_input) {
+            //         // MOVs and stills use raw input colorspace for true passthrough
+            //         r["input_colorspace"] = "Utility - Raw";
+            //     }
+            // }
+            std::string override_view;
+            bool needs_raw_input = false;
 
             // Set automatic view and input colorspace for EXR files based on type
             // - Lineup EXR: use rdo-nwb input colorspace (no white balance), no view override
