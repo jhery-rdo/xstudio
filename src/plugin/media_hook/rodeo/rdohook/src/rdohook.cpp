@@ -466,8 +466,12 @@ class RodeoMediaHook : public MediaHook {
                         cs,
                         path);
 
-                    // Simple view selection based on path
-                    if (path.find("/assets/") != std::string::npos) {
+                    // View selection based on path and colorspace
+                    // Assets use Neutral-look, but only for EXRs (not MOVs/stills)
+                    std::string csName(cs);
+                    bool is_raw = csName.find("Raw") != std::string::npos ||
+                                  csName.find("raw") != std::string::npos;
+                    if (path.find("/assets/") != std::string::npos && !is_raw) {
                         r["automatic_view"] = "Neutral-look";
                         auto_view = "Neutral-look";
                     }
