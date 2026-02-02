@@ -466,42 +466,30 @@ class RodeoMediaHook : public MediaHook {
                         cs,
                         path);
 
-                    // Determine automatic view based on content type
-                    // View names are validated against the config
-                    const char *defaultDisplay = config->getDefaultDisplay();
+                    // Query automatic view from viewing_rules based on colorspace encoding
+                    // This is fully config-driven - no hardcoded view names
                     auto colorspace = config->getColorSpace(cs);
-
-                    // Helper to find view in config
-                    auto findView = [&](const std::string &targetView) -> bool {
-                        if (!defaultDisplay) return false;
-                        int numViews = config->getNumViews(defaultDisplay);
-                        for (int i = 0; i < numViews; ++i) {
-                            const char *v = config->getView(defaultDisplay, i);
-                            if (v && std::string(v) == targetView) return true;
-                        }
-                        return false;
-                    };
-
-                    // Check for raw/data colorspace - use raw view for passthrough
                     if (colorspace) {
                         const char *encoding = colorspace->getEncoding();
-                        std::string csName(cs);
-                        bool is_raw = (encoding && std::string(encoding) == "data") ||
-                                      (csName.find("Raw") != std::string::npos) ||
-                                      (csName.find("raw") != std::string::npos);
-                        if (is_raw && findView("raw")) {
-                            r["automatic_view"] = "raw";
-                            auto_view = "raw";
-                            spdlog::debug("RodeoMediaHook: Using raw view for passthrough");
-                        }
-                    }
-
-                    // Check for assets - use Neutral-look view (no shot-specific grading)
-                    if (auto_view == "(none)" && path.find("/assets/") != std::string::npos) {
-                        if (findView("Neutral-look")) {
-                            r["automatic_view"] = "Neutral-look";
-                            auto_view = "Neutral-look";
-                            spdlog::debug("RodeoMediaHook: Using Neutral-look view for asset");
+                        if (encoding && *encoding) {
+                            const char *defaultDisplay = config->getDefaultDisplay();
+                            if (defaultDisplay) {
+                                // Get views filtered by viewing_rules for this colorspace
+                                // The first view in the list is the preferred view for this encoding
+                                int numViews = config->getNumViews(defaultDisplay, cs);
+                                if (numViews > 0) {
+                                    const char *firstView = config->getView(defaultDisplay, cs, 0);
+                                    if (firstView && *firstView) {
+                                        r["automatic_view"] = firstView;
+                                        auto_view = firstView;
+                                        spdlog::debug(
+                                            "RodeoMediaHook: viewing_rules selected '{}' for "
+                                            "encoding '{}'",
+                                            firstView,
+                                            encoding);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
