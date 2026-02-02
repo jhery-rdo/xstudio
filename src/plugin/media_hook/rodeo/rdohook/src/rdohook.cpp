@@ -452,9 +452,9 @@ class RodeoMediaHook : public MediaHook {
 
             // Use OCIO file_rules to determine input colorspace for ALL media types
             // The config's file_rules handle: Stills, Movies, Lineup, Assets, Default
-            // No special view logic needed - raw colorspace for baked content,
-            // scene-linear for EXRs, config drives everything
+            // For raw/data colorspaces, also set raw view for full passthrough
             std::string input_cs = "(none)";
+            std::string auto_view = "(none)";
             try {
                 auto config = OCIO::Config::CreateFromFile(ocio_config.c_str());
                 const char *cs = config->getColorSpaceFromFilepath(path.c_str());
@@ -465,6 +465,35 @@ class RodeoMediaHook : public MediaHook {
                         "RodeoMediaHook: OCIO file_rules matched '{}' for path: {}",
                         cs,
                         path);
+
+                    // Check if colorspace is raw/data - if so, use raw view for passthrough
+                    // This ensures baked content (MOVs, stills) displays without transforms
+                    auto colorspace = config->getColorSpace(cs);
+                    if (colorspace) {
+                        const char *encoding = colorspace->getEncoding();
+                        std::string csName(cs);
+                        // Check for data encoding or raw in name
+                        bool is_raw = (encoding && std::string(encoding) == "data") ||
+                                      (csName.find("Raw") != std::string::npos) ||
+                                      (csName.find("raw") != std::string::npos);
+                        if (is_raw) {
+                            // Look for raw view in the config
+                            const char *defaultDisplay = config->getDefaultDisplay();
+                            if (defaultDisplay) {
+                                int numViews = config->getNumViews(defaultDisplay);
+                                for (int i = 0; i < numViews; ++i) {
+                                    const char *viewName = config->getView(defaultDisplay, i);
+                                    if (viewName && std::string(viewName) == "raw") {
+                                        r["automatic_view"] = "raw";
+                                        auto_view = "raw";
+                                        spdlog::debug(
+                                            "RodeoMediaHook: Using raw view for passthrough");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             } catch (const std::exception &e) {
                 spdlog::warn(
@@ -473,13 +502,14 @@ class RodeoMediaHook : public MediaHook {
             }
             spdlog::debug(
                 "RodeoMediaHook::colour_params path={} show={} seq={} shot={} "
-                "ocio_config={} input_colorspace={}",
+                "ocio_config={} input_colorspace={} automatic_view={}",
                 path,
                 show,
                 seq,
                 shot,
                 ocio_config.empty() ? "(none)" : ocio_config,
-                input_cs);
+                input_cs,
+                auto_view);
         } else {
             // No show context - use raw passthrough
             r["ocio_config"]   = "__raw__";
