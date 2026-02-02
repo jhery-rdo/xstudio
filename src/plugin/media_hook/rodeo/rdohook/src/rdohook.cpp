@@ -465,12 +465,19 @@ class RodeoMediaHook : public MediaHook {
                         cs,
                         path);
 
-                    // If colorspace is raw, use raw view for passthrough
+                    // Set automatic view based on colorspace and path
                     std::string csName(cs);
-                    if (csName.find("Raw") != std::string::npos ||
-                        csName.find("raw") != std::string::npos) {
+                    bool is_raw = csName.find("Raw") != std::string::npos ||
+                                  csName.find("raw") != std::string::npos;
+
+                    if (is_raw) {
+                        // Raw colorspace -> raw view for passthrough
                         r["automatic_view"] = "raw";
                         auto_view = "raw";
+                    } else if (path.find("/assets/") != std::string::npos) {
+                        // Asset EXRs -> Neutral-look view
+                        r["automatic_view"] = "Neutral-look";
+                        auto_view = "Neutral-look";
                     }
                 }
             } catch (const std::exception &e) {
