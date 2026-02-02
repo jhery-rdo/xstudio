@@ -62,9 +62,18 @@ class RdoShotGridDataSource : public caf::event_based_actor {
 
             // Python plugin registers itself with us via join_broadcast_atom
             // This is called by the Python RdoShotGridDataSource when it starts
-            [=](broadcast::join_broadcast_atom, caf::actor python_actor) mutable {
-                spdlog::info("RdoShotGridDataSource: Python plugin registered");
-                python_plugin_ = python_actor;
+            // We use current_sender() to get the Python actor since passing actors
+            // from Python doesn't work (ActorConnection can't be cast to caf::actor)
+            [=](broadcast::join_broadcast_atom) mutable -> bool {
+                auto sender = caf::actor_cast<caf::actor>(current_sender());
+                if (sender) {
+                    spdlog::info("RdoShotGridDataSource: Python plugin registered (from sender)");
+                    python_plugin_ = sender;
+                    return true;
+                } else {
+                    spdlog::warn("RdoShotGridDataSource: Could not get sender actor");
+                    return false;
+                }
             },
 
             // Handle get_data requests - this is the main entry point
