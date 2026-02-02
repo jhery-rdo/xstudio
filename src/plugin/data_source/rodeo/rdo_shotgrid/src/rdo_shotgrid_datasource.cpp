@@ -7,9 +7,9 @@
  * using the standard data source pattern (get_data_atom_v).
  *
  * Communication flow:
- * 1. C++ plugin sends get_data_atom_v with BatchQueryVersions request
- * 2. This bridge finds the Python plugin via plugin manager
- * 3. Sets Python plugin's "SG Request" attribute
+ * 1. Python plugin starts and registers itself with this bridge via join_broadcast_atom
+ * 2. C++ plugin sends get_data_atom_v with BatchQueryVersions request
+ * 3. This bridge sets Python plugin's "SG Request" attribute
  * 4. Polls Python plugin's "SG Response" attribute for result
  * 5. Returns result to calling C++ plugin
  */
@@ -35,9 +35,6 @@ namespace {
 // Registry name for this data source
 const std::string rdo_shotgrid_registry{"RDOSHOTGRID"};
 
-// Name of the Python plugin we delegate to
-const std::string python_plugin_name{"RdoShotGridDataSource"};
-
 // Timeout for waiting for Python response
 constexpr auto PYTHON_RESPONSE_TIMEOUT = 30s;
 
@@ -61,6 +58,13 @@ class RdoShotGridDataSource : public caf::event_based_actor {
 
             [=](utility::name_atom) -> std::string {
                 return "RdoShotGridDataSource";
+            },
+
+            // Python plugin registers itself with us via join_broadcast_atom
+            // This is called by the Python RdoShotGridDataSource when it starts
+            [=](broadcast::join_broadcast_atom, caf::actor python_actor) mutable {
+                spdlog::info("RdoShotGridDataSource: Python plugin registered");
+                python_plugin_ = python_actor;
             },
 
             // Handle get_data requests - this is the main entry point
@@ -128,51 +132,23 @@ class RdoShotGridDataSource : public caf::event_based_actor {
     /**
      * Delegate request to Python plugin via module attributes.
      *
-     * This finds the Python RdoShotGridDataSource plugin, sets its
-     * "SG Request" attribute with the request, and polls "SG Response"
-     * for the result.
+     * Uses the registered Python plugin actor (set via join_broadcast_atom),
+     * sets its "SG Request" attribute with the request, and polls
+     * "SG Response" for the result.
      */
     void delegate_to_python(
         caf::typed_response_promise<JsonStore> rp,
         const JsonStore &request) {
 
         try {
-            // Find the Python plugin via plugin manager
-            auto plugin_manager =
-                system().registry().template get<caf::actor>(plugin_manager_registry);
-
-            if (!plugin_manager) {
-                throw std::runtime_error("Plugin manager not found");
+            // Check if Python plugin has registered
+            if (!python_plugin_) {
+                throw std::runtime_error(
+                    "Python RdoShotGridDataSource not registered. "
+                    "Ensure the Python plugin is loaded and has registered via join_broadcast_atom.");
             }
 
             scoped_actor sys{system()};
-
-            // Get list of plugins to find our Python plugin
-            auto plugin_details = request_receive<std::vector<plugin_manager::PluginDetail>>(
-                *sys, plugin_manager, utility::detail_atom_v);
-
-            caf::actor python_plugin;
-            Uuid python_plugin_uuid;
-
-            for (const auto &detail : plugin_details) {
-                if (detail.name_ == python_plugin_name && detail.enabled_) {
-                    python_plugin_uuid = detail.uuid_;
-                    break;
-                }
-            }
-
-            if (python_plugin_uuid.is_null()) {
-                throw std::runtime_error(
-                    "Python plugin '" + python_plugin_name + "' not found or not enabled");
-            }
-
-            // Get the plugin actor
-            python_plugin = request_receive<caf::actor>(
-                *sys, plugin_manager, plugin_manager::spawn_plugin_atom_v, python_plugin_uuid);
-
-            if (!python_plugin) {
-                throw std::runtime_error("Could not spawn Python plugin");
-            }
 
             // Set the request attribute on the Python plugin
             auto request_json = request.dump();
@@ -183,7 +159,7 @@ class RdoShotGridDataSource : public caf::event_based_actor {
             // This triggers the Python plugin to process the request
             request_receive<bool>(
                 *sys,
-                python_plugin,
+                python_plugin_,
                 module::change_attribute_value_atom_v,
                 std::string("SG Request"),
                 JsonStore(request_json),
@@ -205,7 +181,7 @@ class RdoShotGridDataSource : public caf::event_based_actor {
                 try {
                     auto response_json = request_receive<JsonStore>(
                         *sys,
-                        python_plugin,
+                        python_plugin_,
                         module::attribute_value_atom_v,
                         std::string("SG Response"));
 
@@ -216,7 +192,7 @@ class RdoShotGridDataSource : public caf::event_based_actor {
                         // Clear the response attribute for next request
                         request_receive<bool>(
                             *sys,
-                            python_plugin,
+                            python_plugin_,
                             module::change_attribute_value_atom_v,
                             std::string("SG Response"),
                             JsonStore(""),
@@ -240,6 +216,7 @@ class RdoShotGridDataSource : public caf::event_based_actor {
 
   private:
     caf::behavior behavior_;
+    caf::actor python_plugin_;  // Registered Python plugin actor
 };
 
 extern "C" {
