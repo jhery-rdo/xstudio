@@ -453,6 +453,7 @@ class RodeoMediaHook : public MediaHook {
             // Use OCIO file_rules to determine input colorspace
             // Config file_rules handle: Stills, Movies, Lineup, Default
             std::string input_cs = "(none)";
+            std::string auto_view = "(none)";
             try {
                 auto config = OCIO::Config::CreateFromFile(ocio_config.c_str());
                 const char *cs = config->getColorSpaceFromFilepath(path.c_str());
@@ -463,6 +464,14 @@ class RodeoMediaHook : public MediaHook {
                         "RodeoMediaHook: OCIO file_rules matched '{}' for path: {}",
                         cs,
                         path);
+
+                    // If colorspace is raw, use raw view for passthrough
+                    std::string csName(cs);
+                    if (csName.find("Raw") != std::string::npos ||
+                        csName.find("raw") != std::string::npos) {
+                        r["automatic_view"] = "raw";
+                        auto_view = "raw";
+                    }
                 }
             } catch (const std::exception &e) {
                 spdlog::warn(
@@ -471,13 +480,14 @@ class RodeoMediaHook : public MediaHook {
             }
             spdlog::debug(
                 "RodeoMediaHook::colour_params path={} show={} seq={} shot={} "
-                "ocio_config={} input_colorspace={}",
+                "ocio_config={} input_colorspace={} automatic_view={}",
                 path,
                 show,
                 seq,
                 shot,
                 ocio_config.empty() ? "(none)" : ocio_config,
-                input_cs);
+                input_cs,
+                auto_view);
         } else {
             // No show context - use raw passthrough
             r["ocio_config"]   = "__raw__";
