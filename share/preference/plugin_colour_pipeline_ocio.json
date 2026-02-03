@@ -4,9 +4,9 @@
 			"ocio": {
 				"global_view_mode": {
 					"path": "/plugin/colour_pipeline/ocio/global_view_mode",
-					"default_value": true,
+					"default_value": false,
 					"description": "Apply OCIO view selection to all media.",
-					"value": true,
+					"value": false,
 					"datatype": "bool",
 					"context": ["APPLICATION"]
 				},
