@@ -3,6 +3,7 @@
 #include <regex>
 #include <algorithm>
 #include <set>
+#include <unordered_map>
 #include <cstdlib>
 
 #include <spdlog/spdlog.h>
@@ -156,6 +157,12 @@ class RodeoMediaHook : public MediaHook {
     module::BooleanAttribute *auto_trim_slate_;
     module::StringAttribute *rez_ocio_config_root_;
     module::StringAttribute *default_show_;
+
+    // Cache OCIO configs per config file path (avoids re-parsing on every media load)
+    std::unordered_map<std::string, OCIO::ConstConfigRcPtr> ocio_config_cache_;
+
+    // Cache resolved OCIO config paths per show (avoids NFS stat on every media load)
+    std::unordered_map<std::string, std::string> ocio_config_path_cache_;
 
     // File extension sets for media type detection
     static inline const std::set<std::string> movie_ext_{".mov", ".mp4", ".mxf", ".qt"};
@@ -329,7 +336,25 @@ class RodeoMediaHook : public MediaHook {
     }
 
     /**
+     * Get an OCIO config, returning a cached instance if available.
+     * Avoids re-parsing the same config file on every media load.
+     *
+     * @param config_path Path to the OCIO config file
+     * @return Cached or newly parsed OCIO config
+     */
+    OCIO::ConstConfigRcPtr get_ocio_config_cached(const std::string &config_path) {
+        auto it = ocio_config_cache_.find(config_path);
+        if (it != ocio_config_cache_.end()) {
+            return it->second;
+        }
+        auto config = OCIO::Config::CreateFromFile(config_path.c_str());
+        ocio_config_cache_[config_path] = config;
+        return config;
+    }
+
+    /**
      * Find the OCIO config path for a show.
+     * Results are cached per show to avoid repeated NFS stat calls.
      *
      * @param show Show code
      * @return Path to OCIO config file or empty string if not found
@@ -337,6 +362,11 @@ class RodeoMediaHook : public MediaHook {
     std::string find_ocio_config(const std::string &show) {
         if (show.empty())
             return "";
+
+        auto it = ocio_config_path_cache_.find(show);
+        if (it != ocio_config_path_cache_.end()) {
+            return it->second;
+        }
 
         std::string show_lower = show;
         std::transform(show_lower.begin(), show_lower.end(), show_lower.begin(), ::tolower);
@@ -347,11 +377,13 @@ class RodeoMediaHook : public MediaHook {
             show_lower,
             show_lower);
 
+        std::string result;
         if (fs::exists(config_path)) {
-            return config_path;
+            result = config_path;
         }
 
-        return "";
+        ocio_config_path_cache_[show] = result;
+        return result;
     }
 
     /**
@@ -455,7 +487,7 @@ class RodeoMediaHook : public MediaHook {
             std::string input_cs = "(none)";
             std::string auto_view = "(none)";
             try {
-                auto config = OCIO::Config::CreateFromFile(ocio_config.c_str());
+                auto config = get_ocio_config_cached(ocio_config);
                 const char *cs = config->getColorSpaceFromFilepath(path.c_str());
                 if (cs && *cs) {
                     r["input_colorspace"] = cs;
