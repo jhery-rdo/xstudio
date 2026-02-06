@@ -166,9 +166,6 @@ class RodeoMediaHook : public MediaHook {
 
     // File extension sets for media type detection
     static inline const std::set<std::string> movie_ext_{".mov", ".mp4", ".mxf", ".qt"};
-    static inline const std::set<std::string> still_ext_{
-        ".tiff", ".tif", ".jpeg", ".jpg", ".png"};
-
     /**
      * Check if a path should have its slate frame trimmed.
      *
@@ -274,68 +271,6 @@ class RodeoMediaHook : public MediaHook {
     }
 
     /**
-     * Check if media is "baked" (movie or still image that needs raw passthrough).
-     *
-     * @param path Path to the media file
-     * @return true if file is a movie or still image
-     */
-    bool is_baked_media(const std::string &path) {
-        std::string ext = fs::path(path).extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-        if (movie_ext_.find(ext) != movie_ext_.end())
-            return true;
-        if (still_ext_.find(ext) != still_ext_.end())
-            return true;
-
-        return false;
-    }
-
-    /**
-     * Check if path is a lineup EXR that needs the non-white-balance view.
-     *
-     * @param path Path to check
-     * @return true if path contains ".lineup." and is an EXR
-     */
-    bool is_lineup_exr(const std::string &path) {
-        std::string lower_path = path;
-        std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
-
-        if (!ends_with(lower_path, ".exr"))
-            return false;
-
-        return lower_path.find(".lineup.") != std::string::npos;
-    }
-
-    /**
-     * Check if path is an asset (vs a shot).
-     *
-     * @param path Path to check
-     * @return true if path contains "/assets/"
-     */
-    bool is_asset(const std::string &path) {
-        std::string lower_path = path;
-        std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
-        return lower_path.find("/assets/") != std::string::npos;
-    }
-
-    /**
-     * Get the view override based on media type.
-     * Only used for baked media (MOV/stills) that need raw passthrough.
-     * EXR views are handled via automatic_view instead.
-     *
-     * @param path Path to media file
-     * @return Pair of (view_name, needs_raw_input) - view_name empty if no override needed
-     */
-    std::pair<std::string, bool> get_override_view_for_path(const std::string &path) {
-        if (is_baked_media(path)) {
-            return {"raw", true};
-        }
-
-        return {"", false};
-    }
-
-    /**
      * Get an OCIO config, returning a cached instance if available.
      * Avoids re-parsing the same config file on every media load.
      *
@@ -392,8 +327,9 @@ class RodeoMediaHook : public MediaHook {
      * This sets up:
      *   - ocio_context with SEQ, SHOT, REZ_RDO_OCIO_CONFIG_ROOT, RDO_CURRENT_SHOW
      *   - ocio_config path
-     *   - override_view for MOVs/stills ("raw") or lineup EXRs
-     *   - input_colorspace for MOVs/stills ("Utility - Raw")
+     *   - input_colorspace via OCIO file_rules
+     *
+     * All view/look decisions are driven by the OCIO config.
      *
      * @param path POSIX path to media
      * @param metadata Existing metadata
@@ -459,18 +395,14 @@ class RodeoMediaHook : public MediaHook {
             context["RDO_CURRENT_SHOW"] = show;
         }
 
-        // Debug: log the OCIO context being applied
-        bool is_lineup = is_lineup_exr(path);
         spdlog::debug(
-            "RodeoMediaHook::colour_params OCIO context: path={} show={} seq={} shot={} "
-            "is_lineup={} (lineup files use rdo-nwb to bypass shot white balance)",
+            "RodeoMediaHook::colour_params OCIO context: path={} show={} seq={} shot={}",
             path,
             show.empty() ? "(none)" : show,
             seq.empty() ? "(none)" : seq,
-            shot.empty() ? "(none)" : shot,
-            is_lineup);
+            shot.empty() ? "(none)" : shot);
 
-        // Only set OCIO config if we have a show
+        // Set OCIO config and let the config drive all colour decisions
         if (!show.empty()) {
             r["ocio_context"] = context;
 
@@ -479,13 +411,8 @@ class RodeoMediaHook : public MediaHook {
                 r["ocio_config"] = ocio_config;
             }
 
-            // Set working space to scene_linear (standard for EXR workflows)
-            r["working_space"] = "scene_linear";
-
             // Use OCIO file_rules to determine input colorspace
-            // Config file_rules handle: Stills, Movies, Lineup, Default
             std::string input_cs = "(none)";
-            std::string auto_view = "(none)";
             try {
                 auto config = get_ocio_config_cached(ocio_config);
                 const char *cs = config->getColorSpaceFromFilepath(path.c_str());
@@ -496,21 +423,6 @@ class RodeoMediaHook : public MediaHook {
                         "RodeoMediaHook: OCIO file_rules matched '{}' for path: {}",
                         cs,
                         path);
-
-                    // Set automatic view based on colorspace and path
-                    std::string csName(cs);
-                    bool is_raw = csName.find("Raw") != std::string::npos ||
-                                  csName.find("raw") != std::string::npos;
-
-                    if (is_raw) {
-                        // Raw colorspace -> raw view for passthrough
-                        r["automatic_view"] = "raw";
-                        auto_view = "raw";
-                    } else if (path.find("/assets/") != std::string::npos) {
-                        // Asset EXRs -> Neutral-look view
-                        r["automatic_view"] = "Neutral-look";
-                        auto_view = "Neutral-look";
-                    }
                 }
             } catch (const std::exception &e) {
                 spdlog::warn(
@@ -519,21 +431,13 @@ class RodeoMediaHook : public MediaHook {
             }
             spdlog::debug(
                 "RodeoMediaHook::colour_params path={} show={} seq={} shot={} "
-                "ocio_config={} input_colorspace={} automatic_view={}",
+                "ocio_config={} input_colorspace={}",
                 path,
                 show,
                 seq,
                 shot,
                 ocio_config.empty() ? "(none)" : ocio_config,
-                input_cs,
-                auto_view);
-        } else {
-            // No show context - use raw passthrough
-            r["ocio_config"]   = "__raw__";
-            r["working_space"] = "raw";
-            spdlog::debug(
-                "RodeoMediaHook::colour_params path={} - no show found, using raw passthrough",
-                path);
+                input_cs);
         }
 
         return r;
