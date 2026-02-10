@@ -423,6 +423,14 @@ class RodeoMediaHook : public MediaHook {
                         "RodeoMediaHook: OCIO file_rules matched '{}' for path: {}",
                         cs,
                         path);
+
+                    // Raw colorspaces need raw view passthrough - otherwise
+                    // the default view (client look) gets applied incorrectly
+                    std::string csName(cs);
+                    if (csName.find("Raw") != std::string::npos ||
+                        csName.find("raw") != std::string::npos) {
+                        r["automatic_view"] = "raw";
+                    }
                 }
             } catch (const std::exception &e) {
                 spdlog::warn(
