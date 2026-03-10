@@ -353,68 +353,58 @@ void PlayheadActor::init() {
 
         [=](jump_atom, const int frame) -> result<bool> {
             auto rp = make_response_promise<bool>();
-            // by requesting duration from self we ensure that we have updated
-            // internal data about source duration, incase this jump message
-            // has come immediately after a change in the source, for example
-            mail(duration_flicks_atom_v)
-                .request(caf::actor_cast<caf::actor>(this), infinite)
-                .then(
-                    [=](const timebase::flicks duration) mutable {
-                        if (duration != timebase::k_flicks_zero_seconds) {
-                            mail(logical_frame_to_flicks_atom_v, frame, true)
-                                .request(hero_sub_playhead_.actor(), infinite)
-                                .then(
+            // Use the already-cached duration rather than requesting it from
+            // self on every scrub event. The duration is kept up-to-date when
+            // the source actually changes (via duration_flicks_atom handlers
+            // triggered by source change events).
+            if (duration() != timebase::k_flicks_zero_seconds) {
+                mail(logical_frame_to_flicks_atom_v, frame, true)
+                    .request(hero_sub_playhead_.actor(), infinite)
+                    .then(
 
-                                    [=](const timebase::flicks flicks) mutable {
-                                        set_position(flicks);
-                                        update_child_playhead_positions(true);
-                                        rp.deliver(true);
-                                    },
-                                    [=](const error &err) mutable { rp.deliver(err); });
-                        } else {
-                            set_position(timebase::k_flicks_zero_seconds);
-                            rp.deliver(false);
-                        }
-                    },
-                    [=](const caf::error &err) mutable { rp.deliver(err); });
+                        [=](const timebase::flicks flicks) mutable {
+                            set_position(flicks);
+                            update_child_playhead_positions(true);
+                            rp.deliver(true);
+                        },
+                        [=](const error &err) mutable { rp.deliver(err); });
+            } else {
+                set_position(timebase::k_flicks_zero_seconds);
+                rp.deliver(false);
+            }
 
             return rp;
         },
 
         [=](jump_atom, const timebase::flicks flicks) -> result<bool> {
             auto rp = make_response_promise<bool>();
-            // by requesting duration from self we ensure that we have updated
-            // internal data about source duration, incase this jump message
-            // has come immediately after a change in the source, for example
-            mail(duration_flicks_atom_v)
-                .request(caf::actor_cast<caf::actor>(this), infinite)
+            // Use the already-cached duration rather than requesting it from
+            // self on every scrub event. The duration is kept up-to-date when
+            // the source actually changes (via duration_flicks_atom handlers
+            // triggered by source change events).
+            if (duration() != timebase::k_flicks_zero_seconds) {
+                set_position(flicks);
+                update_child_playhead_positions(true);
+            } else {
+                set_position(timebase::k_flicks_zero_seconds);
+            }
+            // we only deliver the result when we have waited for
+            // the key playhead to update its position. This means
+            // that whever made the original request can be sure
+            // that the playhead is ready to deliver the frame for
+            // the requested 'flicks' position
+            mail(
+                jump_atom_v,
+                position(),
+                forward(),
+                velocity(),
+                playing(),
+                true,
+                connected_to_ui(),
+                user_is_frame_scrubbing_->value())
+                .request(hero_sub_playhead_.actor(), infinite)
                 .then(
-                    [=](const timebase::flicks duration) mutable {
-                        if (duration != timebase::k_flicks_zero_seconds) {
-                            set_position(flicks);
-                            update_child_playhead_positions(true);
-                        } else {
-                            set_position(timebase::k_flicks_zero_seconds);
-                        }
-                        // we only deliver the result when we have waited for
-                        // the key playhead to update its position. This means
-                        // that whever made the original request can be sure
-                        // that the playhead is ready to deliver the frame for
-                        // the requested 'flicks' position
-                        mail(
-                            jump_atom_v,
-                            position(),
-                            forward(),
-                            velocity(),
-                            playing(),
-                            true,
-                            connected_to_ui(),
-                            user_is_frame_scrubbing_->value())
-                            .request(hero_sub_playhead_.actor(), infinite)
-                            .then(
-                                [=]() mutable { rp.deliver(true); },
-                                [=](const caf::error &err) mutable { rp.deliver(err); });
-                    },
+                    [=]() mutable { rp.deliver(true); },
                     [=](const caf::error &err) mutable { rp.deliver(err); });
             return rp;
         },
