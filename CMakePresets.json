@@ -7,7 +7,6 @@
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
-        "Qt6_DIR": "/Users/jhery/Qt/6.5.3/macos/lib/cmake/Qt6",
         "CMAKE_INSTALL_PREFIX": "xstudio_install",
         "X_VCPKG_APPLOCAL_DEPS_INSTALL": "ON",
         "BUILD_DOCS": "OFF",
@@ -59,6 +58,7 @@
       "inherits": "default",
       "generator": "Unix Makefiles",
       "cacheVariables": {
+        "Qt6_DIR": "/Users/jhery/Qt/6.5.3/macos/lib/cmake/Qt6",
         "VCPKG_OVERLAY_TRIPLETS" : "${sourceDir}/cmake/vcpkg_triplets",
         "VCPKG_TARGET_TRIPLET": "arm-osx"
       }
