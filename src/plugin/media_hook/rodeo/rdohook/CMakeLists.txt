@@ -1,3 +1,16 @@
+# CMakeLists.txt for rodeo media hook plugin
+# Supports both integrated build (as part of xStudio) and standalone build
+
+# Check if we're building as part of xStudio (XSTUDIO_GLOBAL_VERSION is set)
+if(DEFINED XSTUDIO_GLOBAL_VERSION)
+    # Integrated build - just add the src subdirectory
+    # The add_src_and_test macro will also call add_subdirectory(src), but
+    # having it here ensures the integrated CMakeLists.txt in src/ is used
+    # This file effectively becomes a no-op for integrated builds since
+    # the macro handles adding src/ directly
+    return()
+endif()
+
 # Standalone CMakeLists.txt for building rodeo plugin separately
 # This allows faster iteration when xStudio is already built
 cmake_minimum_required(VERSION 3.16)
