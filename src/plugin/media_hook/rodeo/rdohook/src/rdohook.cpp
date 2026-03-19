@@ -55,12 +55,15 @@ class RodeoMediaHook : public MediaHook {
         default_show_->set_tool_tip(
             "Default show code to use when the show cannot be determined from the media path.");
 
+
 #ifdef __APPLE__
         // Detect macOS mount type for path remapping.
         // OCIO configs reference /shows/... search paths (Linux convention).
         // On macOS: NFS mounts at /rdo/shows, Samba mounts at /Volumes/shows.
-        if (fs::is_directory("/Volumes/shows") && !fs::is_directory("/rdo/shows")) {
+        if (fs::is_directory("/Volumes/shows")) {
             shows_mount_prefix_ = "/Volumes";
+        } else if (fs::is_directory("/rdo/shows")) {
+            shows_mount_prefix_ = "/rdo";
         }
         spdlog::info("RodeoMediaHook: macOS mount prefix: {}", shows_mount_prefix_);
 #endif
@@ -77,8 +80,20 @@ class RodeoMediaHook : public MediaHook {
         utility::MediaReference result = mr;
         bool changed                   = false;
 
+        // Pre-warm the OCIO config for this show so modify_metadata is fast.
+        // modify_media_reference runs before the colour pipeline evaluates;
+        // without this, the first QT load shows the wrong look while the
+        // OCIO config is being created over Samba.
+        {
+            auto path = normalize_path(uri_to_posix_path(mr.uri()));
+            auto show = extract_show_from_path(path);
+            if (!show.empty()) {
+                find_ocio_config(show);
+            }
+        }
+
         if (auto_trim_slate_->value() && mr.container()) {
-            auto path = uri_to_posix_path(mr.uri());
+            auto path = normalize_path(uri_to_posix_path(mr.uri()));
 
             if (should_trim_slate(path)) {
                 auto fr = result.frame_list();
@@ -134,7 +149,7 @@ class RodeoMediaHook : public MediaHook {
             mr.container() || mr.uris().empty() ? mr.uri() : mr.uris()[0].first;
 
         const std::string path = to_string(uri);
-        auto ppath             = uri_to_posix_path(uri);
+        auto ppath             = normalize_path(uri_to_posix_path(uri));
 
         spdlog::debug("RodeoMediaHook::modify_metadata CALLED for: {}", ppath);
 
@@ -183,6 +198,22 @@ class RodeoMediaHook : public MediaHook {
 
     // File extension sets for media type detection
     static inline const std::set<std::string> movie_ext_{".mov", ".mp4", ".mxf", ".qt"};
+
+    /**
+     * Normalize media paths to use the current macOS mount prefix.
+     * Media paths from OTIO/database use /rdo/shows/ (Linux/NFS convention).
+     * On macOS with Samba, the actual mount is at /Volumes/shows/.
+     */
+    std::string normalize_path(const std::string &path) const {
+        if (shows_mount_prefix_ == "/rdo")
+            return path;
+
+        // Remap /rdo/shows/... to {mount_prefix}/shows/...
+        if (path.size() >= 11 && path.substr(0, 11) == "/rdo/shows/") {
+            return shows_mount_prefix_ + path.substr(4);
+        }
+        return path;
+    }
     /**
      * Check if a path should have its slate frame trimmed.
      *
@@ -360,9 +391,19 @@ class RodeoMediaHook : public MediaHook {
     std::string fix_ocio_config_for_macos(
         const std::string &original_path, const std::string &show) {
 
+        std::string temp_path = "/tmp/xstudio_ocio_" + show + "_config.ocio";
+
         auto it = fixed_config_cache_.find(original_path);
         if (it != fixed_config_cache_.end()) {
             return it->second;
+        }
+
+        // Fast path: config pre-created by Python startup (avoids slow Samba I/O)
+        if (fs::exists(temp_path)) {
+            spdlog::info(
+                "RodeoMediaHook: Using pre-warmed OCIO config for {}: {}", show, temp_path);
+            fixed_config_cache_[original_path] = temp_path;
+            return temp_path;
         }
 
         try {
@@ -579,6 +620,21 @@ class RodeoMediaHook : public MediaHook {
                     if (csName.find("Raw") != std::string::npos ||
                         csName.find("raw") != std::string::npos) {
                         r["automatic_view"] = "raw";
+                    }
+                    // Asset EXRs: find a neutral view from the config
+                    else if (path.find("/_asset/") != std::string::npos ||
+                             path.find("/.published/assets/") != std::string::npos) {
+                        auto display = config->getDefaultDisplay();
+                        int nv = config->getNumViews(display, cs);
+                        for (int vi = 0; vi < nv; ++vi) {
+                            std::string view = config->getView(display, cs, vi);
+                            std::string vl = view;
+                            std::transform(vl.begin(), vl.end(), vl.begin(), ::tolower);
+                            if (vl.find("neutral") != std::string::npos) {
+                                r["automatic_view"] = view;
+                                break;
+                            }
+                        }
                     }
                 }
             } catch (const std::exception &e) {
