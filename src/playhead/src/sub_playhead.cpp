@@ -871,7 +871,7 @@ void SubPlayhead::init() {
                 .then(
 
                     [=](ImageBufPtr image_buffer) mutable {
-                        image_buffer.when_to_display() = utility::clock::now();
+                        image_buffer.when_to_display_ = utility::clock::now();
                         image_buffer.set_timline_timestamp(timeline_pts);
                         image_buffer.set_frame_id(*(frame.get()));
                         image_buffer.set_playhead_logical_frame(
@@ -891,7 +891,7 @@ void SubPlayhead::init() {
         },
 
         [=](media_reader::push_image_atom,
-            ImageBufPtr &image_buffer,
+            ImageBufPtr image_buffer,
             const media::AVFrameID &mptr,
             const time_point &tp,
             const timebase::flicks timeline_pts) {
@@ -1231,7 +1231,7 @@ void SubPlayhead::broadcast_image_frame(
         .then(
 
             [=](ImageBufPtr image_buffer) mutable {
-                image_buffer.when_to_display() = when_to_show_frame;
+                image_buffer.when_to_display_ = when_to_show_frame;
                 image_buffer.set_timline_timestamp(timeline_pts);
                 image_buffer.set_frame_id(*(frame_media_pointer.get()));
                 image_buffer.set_playhead_logical_frame(logical_frame_from_pts(timeline_pts));
@@ -1565,7 +1565,7 @@ void SubPlayhead::request_future_frames() {
         .request(pre_reader_, std::chrono::milliseconds(5000))
         .then(
 
-            [=](std::vector<ImageBufPtr> &image_buffers) mutable {
+            [=](std::vector<ImageBufPtr> image_buffers) mutable {
                 auto tp   = timeline_pts_vec.begin();
                 auto idsp = future_frames.begin();
 
@@ -1573,7 +1573,7 @@ void SubPlayhead::request_future_frames() {
                     imbuf.set_playhead_logical_frame(logical_frame_from_pts(*(tp)));
                     imbuf.set_playhead_logical_duration(logical_frames_.size());
                     imbuf.set_timline_timestamp(*(tp++));
-                    imbuf.when_to_display()                        = (idsp)->first;
+                    imbuf.when_to_display_                         = (idsp)->first;
                     std::shared_ptr<const media::AVFrameID> av_idx = (idsp++)->second;
 
                     if (av_idx) {
@@ -1662,7 +1662,7 @@ void SubPlayhead::make_prefetch_requests_for_colour_pipeline(
 
 
 void SubPlayhead::receive_image_from_cache(
-    ImageBufPtr &image_buffer,
+    ImageBufPtr image_buffer,
     const media::AVFrameID mptr,
     const time_point tp,
     const timebase::flicks timeline_pts) {
@@ -1674,7 +1674,7 @@ void SubPlayhead::receive_image_from_cache(
         return;
     last_image_timepoint_ = tp;
 
-    image_buffer.when_to_display() = utility::clock::now();
+    image_buffer.when_to_display_ = utility::clock::now();
     image_buffer.set_timline_timestamp(timeline_pts);
     image_buffer.set_playhead_logical_frame(logical_frame_from_pts(timeline_pts));
     image_buffer.set_playhead_logical_duration(logical_frames_.size());
@@ -2633,9 +2633,8 @@ void SubPlayhead::check_if_media_changed(const media::AVFrameID *frame_id) {
     // need to knw about what the on-screen media is (like HUD Plugins or colour pipeline) will
     // recieve this info which is forwarded on by other intermediaries (ViewportFrameQueueActor,
     // GlobalPlayheadEventsActor etc)
-    if (frame_id &&
-        (frame_id->source_uuid() != current_source_ ||
-         frame_id->media_uuid() != current_media_ || frame_id->clip_uuid() != current_clip_)) {
+    if (frame_id && (frame_id->source_uuid() != current_source_ ||
+                     frame_id->media_uuid() != current_media_)) {
 
         // if current_source_ is null, it means we've had a change event and
         // rebuilt the timeline frames. This could be because the media rate
@@ -2645,7 +2644,6 @@ void SubPlayhead::check_if_media_changed(const media::AVFrameID *frame_id) {
 
         current_source_ = frame_id->source_uuid();
         current_media_  = frame_id->media_uuid();
-        current_clip_   = frame_id->clip_uuid();
         mail(
             event_atom_v,
             media_source_atom_v,
@@ -2653,7 +2651,6 @@ void SubPlayhead::check_if_media_changed(const media::AVFrameID *frame_id) {
                 current_media_, caf::actor_cast<caf::actor>(frame_id->media_addr())),
             utility::UuidActor(
                 current_source_, caf::actor_cast<caf::actor>(frame_id->media_source_addr())),
-            current_clip_,
             sub_playhead_index_,
             check_rate)
             .send(parent_);
@@ -2667,7 +2664,6 @@ void SubPlayhead::check_if_media_changed(const media::AVFrameID *frame_id) {
             media_source_atom_v,
             utility::UuidActor(),
             utility::UuidActor(),
-            utility::Uuid(),
             sub_playhead_index_,
             false)
             .send(parent_);

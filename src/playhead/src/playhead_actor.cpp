@@ -353,68 +353,58 @@ void PlayheadActor::init() {
 
         [=](jump_atom, const int frame) -> result<bool> {
             auto rp = make_response_promise<bool>();
-            // by requesting duration from self we ensure that we have updated
-            // internal data about source duration, incase this jump message
-            // has come immediately after a change in the source, for example
-            mail(duration_flicks_atom_v)
-                .request(caf::actor_cast<caf::actor>(this), infinite)
-                .then(
-                    [=](const timebase::flicks duration) mutable {
-                        if (duration != timebase::k_flicks_zero_seconds) {
-                            mail(logical_frame_to_flicks_atom_v, frame, true)
-                                .request(hero_sub_playhead_.actor(), infinite)
-                                .then(
+            // Use the already-cached duration rather than requesting it from
+            // self on every scrub event. The duration is kept up-to-date when
+            // the source actually changes (via duration_flicks_atom handlers
+            // triggered by source change events).
+            if (duration() != timebase::k_flicks_zero_seconds) {
+                mail(logical_frame_to_flicks_atom_v, frame, true)
+                    .request(hero_sub_playhead_.actor(), infinite)
+                    .then(
 
-                                    [=](const timebase::flicks flicks) mutable {
-                                        set_position(flicks);
-                                        update_child_playhead_positions(true);
-                                        rp.deliver(true);
-                                    },
-                                    [=](const error &err) mutable { rp.deliver(err); });
-                        } else {
-                            set_position(timebase::k_flicks_zero_seconds);
-                            rp.deliver(false);
-                        }
-                    },
-                    [=](const caf::error &err) mutable { rp.deliver(err); });
+                        [=](const timebase::flicks flicks) mutable {
+                            set_position(flicks);
+                            update_child_playhead_positions(true);
+                            rp.deliver(true);
+                        },
+                        [=](const error &err) mutable { rp.deliver(err); });
+            } else {
+                set_position(timebase::k_flicks_zero_seconds);
+                rp.deliver(false);
+            }
 
             return rp;
         },
 
         [=](jump_atom, const timebase::flicks flicks) -> result<bool> {
             auto rp = make_response_promise<bool>();
-            // by requesting duration from self we ensure that we have updated
-            // internal data about source duration, incase this jump message
-            // has come immediately after a change in the source, for example
-            mail(duration_flicks_atom_v)
-                .request(caf::actor_cast<caf::actor>(this), infinite)
+            // Use the already-cached duration rather than requesting it from
+            // self on every scrub event. The duration is kept up-to-date when
+            // the source actually changes (via duration_flicks_atom handlers
+            // triggered by source change events).
+            if (duration() != timebase::k_flicks_zero_seconds) {
+                set_position(flicks);
+                update_child_playhead_positions(true);
+            } else {
+                set_position(timebase::k_flicks_zero_seconds);
+            }
+            // we only deliver the result when we have waited for
+            // the key playhead to update its position. This means
+            // that whever made the original request can be sure
+            // that the playhead is ready to deliver the frame for
+            // the requested 'flicks' position
+            mail(
+                jump_atom_v,
+                position(),
+                forward(),
+                velocity(),
+                playing(),
+                true,
+                connected_to_ui(),
+                user_is_frame_scrubbing_->value())
+                .request(hero_sub_playhead_.actor(), infinite)
                 .then(
-                    [=](const timebase::flicks duration) mutable {
-                        if (duration != timebase::k_flicks_zero_seconds) {
-                            set_position(flicks);
-                            update_child_playhead_positions(true);
-                        } else {
-                            set_position(timebase::k_flicks_zero_seconds);
-                        }
-                        // we only deliver the result when we have waited for
-                        // the key playhead to update its position. This means
-                        // that whever made the original request can be sure
-                        // that the playhead is ready to deliver the frame for
-                        // the requested 'flicks' position
-                        mail(
-                            jump_atom_v,
-                            position(),
-                            forward(),
-                            velocity(),
-                            playing(),
-                            true,
-                            connected_to_ui(),
-                            user_is_frame_scrubbing_->value())
-                            .request(hero_sub_playhead_.actor(), infinite)
-                            .then(
-                                [=]() mutable { rp.deliver(true); },
-                                [=](const caf::error &err) mutable { rp.deliver(err); });
-                    },
+                    [=]() mutable { rp.deliver(true); },
                     [=](const caf::error &err) mutable { rp.deliver(err); });
             return rp;
         },
@@ -801,7 +791,7 @@ void PlayheadActor::init() {
             ImageBufPtr buf,
             const bool is_onscreen_frame) {
             const auto delay = std::chrono::duration_cast<timebase::flicks>(
-                utility::clock::now() - buf.when_to_display());
+                utility::clock::now() - buf.when_to_display_);
 
             /* If the image is more than 2 frames late, we assume that the image reader
             can't keep up so we start slowing the playhead down until frames start arriving on
@@ -1162,7 +1152,6 @@ void PlayheadActor::init() {
             media_source_atom,
             utility::UuidActor media,
             utility::UuidActor media_source,
-            utility::Uuid clip_uuid,
             const int sub_playhead_index,
             const bool check_rate) {
             // message from one of our sub-playheads ... the media source and/or
@@ -1170,10 +1159,8 @@ void PlayheadActor::init() {
             if (sub_playhead_index == key_playhead_index_->value()) {
 
                 if (to_string(media.uuid()) != current_media_uuid_->value() or
-                    to_string(media_source.uuid()) != current_media_source_uuid_->value() or
-                    to_string(clip_uuid) != current_clip_uuid_->value()) {
+                    to_string(media_source.uuid()) != current_media_source_uuid_->value()) {
 
-                    current_clip_uuid_->set_value(to_string(clip_uuid));
                     current_media_uuid_->set_value(to_string(media.uuid()));
                     current_media_source_uuid_->set_value(to_string(media_source.uuid()));
                     current_media_changed(media.actor(), true);
@@ -1655,6 +1642,7 @@ void PlayheadActor::clear_child_playheads() {
     // stop any read-ahead activity for these playheads
     anon_mail(clear_precache_queue_atom_v, to_uuid_vector(sub_playheads_)).send(pre_reader_);
 
+
     // send a message to delete these things in 2 seconds. We want
     // a delay as they may be fetching images and providing them to
     // the Viewport while we are setting up new sub-playheads (for
@@ -1665,12 +1653,6 @@ void PlayheadActor::clear_child_playheads() {
 
     sub_playheads_.clear();
     hero_sub_playhead_ = utility::UuidActor();
-
-    if (audio_playhead_) {
-        unlink_from(audio_playhead_);
-        send_exit(audio_playhead_, caf::exit_reason::user_shutdown);
-        audio_playhead_ = caf::actor();
-    }
 }
 
 caf::actor PlayheadActor::make_child_playhead(utility::UuidActor source) {
@@ -1719,7 +1701,7 @@ void PlayheadActor::make_audio_child_playhead(const int source_index) {
 
     if (timeline_mode()) {
         // Are we already hooked up to the timeline as the audio source?
-        if (audio_src_ == timeline_actor_ && audio_playhead_)
+        if (audio_src_ == timeline_actor_)
             return;
 
         audio_src_ = timeline_actor_;
@@ -1768,21 +1750,6 @@ void PlayheadActor::make_audio_child_playhead(const int source_index) {
         media::MediaType::MT_AUDIO);
 
     join_event_group(this, audio_playhead_);
-
-    if (audio_output_actor_) {
-        // this will clear the audio buffers still with the audio output
-        // actor
-        anon_mail(
-            sound_audio_atom_v,
-            std::vector<AudioBufPtr>(), // empty buffers
-            utility::Uuid(),
-            audio_path_ == playhead::GLOBAL_AUDIO,
-            uuid(),
-            false,
-            position(),
-            playhead_volume_->value())
-            .send(audio_output_actor_);
-    }
 }
 
 void PlayheadActor::new_source_list(const bool force_build) {
@@ -2255,8 +2222,7 @@ void PlayheadActor::update_duration(caf::typed_response_promise<timebase::flicks
         .request(hero_sub_playhead_.actor(), infinite)
         .then(
             [=](const timebase::flicks duration) mutable {
-                if (duration != timebase::k_flicks_zero_seconds &&
-                    PlayheadBase::duration() != duration) {
+                if (duration != timebase::k_flicks_zero_seconds) {
 
                     set_duration(duration);
                     align_audio_playhead();
@@ -2270,11 +2236,10 @@ void PlayheadActor::update_duration(caf::typed_response_promise<timebase::flicks
                         mail(utility::event_atom_v, use_loop_range_atom_v, use_loop_range())
                             .send(event_group_);
                     }
-                    duration_seconds_->set_value(timebase::to_seconds(duration));
-                } else if (PlayheadBase::duration() != duration) {
+                } else {
                     set_duration(duration);
-                    duration_seconds_->set_value(timebase::to_seconds(duration));
                 }
+                duration_seconds_->set_value(timebase::to_seconds(duration));
                 rp.deliver(duration);
             },
             [=](const error &err) mutable {
@@ -2389,9 +2354,7 @@ void PlayheadActor::update_cached_frames_status(
                 // frame is cached - but is it a held frame?
                 if (all_frame_ids_[i]->frame_status() == media::FS_HELD_FRAME)
                     frame_status = 1;
-                else if (
-                    all_frame_ids_[i]->frame_status() == media::FS_NOT_ON_DISK ||
-                    all_frame_ids_[i]->frame_status() == media::FS_UNKNOWN)
+                else if (all_frame_ids_[i]->frame_status() == media::FS_NOT_ON_DISK)
                     frame_status = 2;
                 else
                     frame_status = 0;
