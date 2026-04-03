@@ -201,7 +201,7 @@ class MediaLoaderWorker : public caf::event_based_actor {
                                                 anon_mail(playlist::add_media_atom_v, media_ua, Uuid())
                                                     .send(subset);
                                                 // Select the new media so the viewport updates
-                                                anon_mail(playlist::select_media_atom_v, media_uuid)
+                                                anon_mail(playlist::select_media_atom_v, UuidList({media_uuid}))
                                                     .send(subset);
                                             }
                                             spdlog::info("RdoMediaLoader: MOV loaded for {}", media_name);
