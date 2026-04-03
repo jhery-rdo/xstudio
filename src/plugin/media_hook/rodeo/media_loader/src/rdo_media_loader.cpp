@@ -184,7 +184,7 @@ class MediaLoaderWorker : public caf::event_based_actor {
                                     anon_mail(
                                         json_store::set_json_atom_v, Uuid(),
                                         JsonStore(payload["metadata"]),
-                                        std::string("/metadata/external/RodeoFX"))
+                                        std::string("/shotgrid"))
                                         .send(media_actor);
                                 }
 
