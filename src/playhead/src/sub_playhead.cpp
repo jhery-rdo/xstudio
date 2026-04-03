@@ -871,7 +871,7 @@ void SubPlayhead::init() {
                 .then(
 
                     [=](ImageBufPtr image_buffer) mutable {
-                        image_buffer.when_to_display_ = utility::clock::now();
+                        image_buffer.when_to_display() = utility::clock::now();
                         image_buffer.set_timline_timestamp(timeline_pts);
                         image_buffer.set_frame_id(*(frame.get()));
                         image_buffer.set_playhead_logical_frame(
@@ -1231,7 +1231,7 @@ void SubPlayhead::broadcast_image_frame(
         .then(
 
             [=](ImageBufPtr image_buffer) mutable {
-                image_buffer.when_to_display_ = when_to_show_frame;
+                image_buffer.when_to_display() = when_to_show_frame;
                 image_buffer.set_timline_timestamp(timeline_pts);
                 image_buffer.set_frame_id(*(frame_media_pointer.get()));
                 image_buffer.set_playhead_logical_frame(logical_frame_from_pts(timeline_pts));
@@ -1573,7 +1573,7 @@ void SubPlayhead::request_future_frames() {
                     imbuf.set_playhead_logical_frame(logical_frame_from_pts(*(tp)));
                     imbuf.set_playhead_logical_duration(logical_frames_.size());
                     imbuf.set_timline_timestamp(*(tp++));
-                    imbuf.when_to_display_                         = (idsp)->first;
+                    imbuf.when_to_display()                        = (idsp)->first;
                     std::shared_ptr<const media::AVFrameID> av_idx = (idsp++)->second;
 
                     if (av_idx) {
@@ -1674,7 +1674,7 @@ void SubPlayhead::receive_image_from_cache(
         return;
     last_image_timepoint_ = tp;
 
-    image_buffer.when_to_display_ = utility::clock::now();
+    image_buffer.when_to_display() = utility::clock::now();
     image_buffer.set_timline_timestamp(timeline_pts);
     image_buffer.set_playhead_logical_frame(logical_frame_from_pts(timeline_pts));
     image_buffer.set_playhead_logical_duration(logical_frames_.size());

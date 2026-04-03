@@ -791,7 +791,7 @@ void PlayheadActor::init() {
             ImageBufPtr buf,
             const bool is_onscreen_frame) {
             const auto delay = std::chrono::duration_cast<timebase::flicks>(
-                utility::clock::now() - buf.when_to_display_);
+                utility::clock::now() - buf.when_to_display());
 
             /* If the image is more than 2 frames late, we assume that the image reader
             can't keep up so we start slowing the playhead down until frames start arriving on

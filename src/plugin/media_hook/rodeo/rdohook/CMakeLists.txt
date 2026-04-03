@@ -1,3 +1,11 @@
+# CMakeLists.txt for rodeo media hook plugin
+# Supports both integrated build (as part of xStudio) and standalone build
+
+# Check if we're building as part of xStudio (XSTUDIO_GLOBAL_VERSION is set)
+if(DEFINED XSTUDIO_GLOBAL_VERSION)
+    return()
+endif()
+
 # Standalone CMakeLists.txt for building rodeo plugin separately
 # This allows faster iteration when xStudio is already built
 cmake_minimum_required(VERSION 3.16)
