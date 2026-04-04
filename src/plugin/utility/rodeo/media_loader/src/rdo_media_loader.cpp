@@ -272,8 +272,11 @@ class RdoMediaLoaderPlugin : public xstudio::plugin::StandardPlugin {
             spdlog::warn("RdoMediaLoader: could not resolve session: {}", e.what());
         }
 
-        for (int i = 0; i < 4; ++i)
-            workers_.push_back(spawn<MediaLoaderWorker>(session_));
+        for (int i = 0; i < 4; ++i) {
+            auto w = spawn<MediaLoaderWorker>(session_);
+            link_to(w);
+            workers_.push_back(w);
+        }
     }
 
     ~RdoMediaLoaderPlugin() override = default;
