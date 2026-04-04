@@ -35,8 +35,8 @@ const auto RdoMediaLoaderRegistry = std::string("RDO_MEDIA_LOADER");
 // Step 1: create MOV source → Step 2: create EXR source → Step 3: assemble media.
 class MediaLoaderWorker : public caf::event_based_actor {
   public:
-    MediaLoaderWorker(caf::actor_config &cfg)
-        : caf::event_based_actor(cfg) {}
+    MediaLoaderWorker(caf::actor_config &cfg, caf::actor session)
+        : caf::event_based_actor(cfg), session_(std::move(session)) {}
 
     const char *name() const override { return "RdoMediaLoaderWorker"; }
 
@@ -153,6 +153,7 @@ class MediaLoaderWorker : public caf::event_based_actor {
         auto frames_path = payload.value("frames_path", std::string());
         auto frame_range = payload.value("frame_range", std::string());
         auto media_name  = payload.value("version_name", std::string("unknown"));
+        auto set_viewer  = payload.value("set_viewer", false);
 
         // Phase 1: Create MOV source → add to playlist IMMEDIATELY.
         // This matches the Python sync path where the MOV appears in the
@@ -203,6 +204,12 @@ class MediaLoaderWorker : public caf::event_based_actor {
                                                 // Select the new media so the viewport updates
                                                 anon_mail(playlist::select_media_atom_v, UuidList({media_uuid}))
                                                     .send(subset);
+                                                // Switch viewport to this subset AFTER media is in it
+                                                // (avoids black flash from switching to an empty subset)
+                                                if (set_viewer && session_) {
+                                                    anon_mail(session::viewport_active_media_container_atom_v, subset)
+                                                        .send(session_);
+                                                }
                                             }
                                             spdlog::info("RdoMediaLoader: MOV loaded for {}", media_name);
 
@@ -237,6 +244,8 @@ class MediaLoaderWorker : public caf::event_based_actor {
                     spdlog::warn("RdoMediaLoader: step1: {}", to_string(err));
                 });
     }
+
+    caf::actor session_;
 };
 
 
@@ -251,8 +260,20 @@ class RdoMediaLoaderPlugin : public xstudio::plugin::StandardPlugin {
             RdoMediaLoaderRegistry, caf::actor_cast<caf::actor>(this));
         spdlog::info("RdoMediaLoader: registered as {}", RdoMediaLoaderRegistry);
 
+        // Resolve session actor for set_viewer support
+        try {
+            caf::scoped_actor sys{system()};
+            auto studio = system().registry().template get<caf::actor>(studio_registry);
+            if (studio) {
+                session_ = request_receive<caf::actor>(
+                    *sys, studio, session::session_atom_v);
+            }
+        } catch (const std::exception &e) {
+            spdlog::warn("RdoMediaLoader: could not resolve session: {}", e.what());
+        }
+
         for (int i = 0; i < 4; ++i)
-            workers_.push_back(spawn<MediaLoaderWorker>());
+            workers_.push_back(spawn<MediaLoaderWorker>(session_));
     }
 
     ~RdoMediaLoaderPlugin() override = default;
@@ -274,6 +295,7 @@ class RdoMediaLoaderPlugin : public xstudio::plugin::StandardPlugin {
     }
 
   private:
+    caf::actor session_;
     std::vector<caf::actor> workers_;
     size_t next_worker_{0};
 };
