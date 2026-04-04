@@ -205,10 +205,21 @@ class MediaLoaderWorker : public caf::event_based_actor {
                                                 anon_mail(playlist::select_media_atom_v, UuidList({media_uuid}))
                                                     .send(subset);
                                                 // Switch viewport to this subset AFTER media is in it
-                                                // (avoids black flash from switching to an empty subset)
+                                                // (avoids black flash from switching to an empty subset).
+                                                // Session expects a Uuid, so query it from the subset actor.
                                                 if (set_viewer && session_) {
-                                                    anon_mail(session::viewport_active_media_container_atom_v, subset)
-                                                        .send(session_);
+                                                    mail(utility::uuid_atom_v)
+                                                        .request(subset, std::chrono::seconds(5))
+                                                        .then(
+                                                            [=](const Uuid &subset_uuid) {
+                                                                anon_mail(
+                                                                    session::viewport_active_media_container_atom_v,
+                                                                    subset_uuid)
+                                                                    .send(session_);
+                                                            },
+                                                            [=](caf::error &err) {
+                                                                spdlog::warn("RdoMediaLoader: set_viewer failed: {}", to_string(err));
+                                                            });
                                                 }
                                             }
                                             spdlog::info("RdoMediaLoader: MOV loaded for {}", media_name);
