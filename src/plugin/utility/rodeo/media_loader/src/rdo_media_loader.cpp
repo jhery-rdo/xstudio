@@ -35,8 +35,8 @@ const auto RdoMediaLoaderRegistry = std::string("RDO_MEDIA_LOADER");
 // Step 1: create MOV source → Step 2: create EXR source → Step 3: assemble media.
 class MediaLoaderWorker : public caf::event_based_actor {
   public:
-    MediaLoaderWorker(caf::actor_config &cfg, caf::actor session)
-        : caf::event_based_actor(cfg), session_(std::move(session)) {}
+    MediaLoaderWorker(caf::actor_config &cfg)
+        : caf::event_based_actor(cfg) {}
 
     const char *name() const override { return "RdoMediaLoaderWorker"; }
 
@@ -206,20 +206,32 @@ class MediaLoaderWorker : public caf::event_based_actor {
                                                     .send(subset);
                                                 // Switch viewport to this subset AFTER media is in it
                                                 // (avoids black flash from switching to an empty subset).
-                                                // Session expects a Uuid, so query it from the subset actor.
-                                                if (set_viewer && session_) {
-                                                    mail(utility::uuid_atom_v)
-                                                        .request(subset, std::chrono::seconds(5))
-                                                        .then(
-                                                            [=](const Uuid &subset_uuid) {
-                                                                anon_mail(
-                                                                    session::viewport_active_media_container_atom_v,
-                                                                    subset_uuid)
-                                                                    .send(session_);
-                                                            },
-                                                            [=](caf::error &err) {
-                                                                spdlog::warn("RdoMediaLoader: set_viewer failed: {}", to_string(err));
-                                                            });
+                                                // Resolve session lazily — it may not exist at plugin startup.
+                                                if (set_viewer) {
+                                                    auto studio = system().registry().template get<caf::actor>(studio_registry);
+                                                    if (studio) {
+                                                        mail(session::session_atom_v)
+                                                            .request(studio, std::chrono::seconds(5))
+                                                            .then(
+                                                                [=, this](caf::actor session) {
+                                                                    mail(utility::uuid_atom_v)
+                                                                        .request(subset, std::chrono::seconds(5))
+                                                                        .then(
+                                                                            [=](const Uuid &subset_uuid) {
+                                                                                anon_mail(
+                                                                                    session::viewport_active_media_container_atom_v,
+                                                                                    subset_uuid)
+                                                                                    .send(session);
+                                                                                spdlog::info("RdoMediaLoader: set viewer to subset");
+                                                                            },
+                                                                            [=](caf::error &err) {
+                                                                                spdlog::warn("RdoMediaLoader: set_viewer UUID failed: {}", to_string(err));
+                                                                            });
+                                                                },
+                                                                [=](caf::error &err) {
+                                                                    spdlog::warn("RdoMediaLoader: set_viewer session lookup failed: {}", to_string(err));
+                                                                });
+                                                    }
                                                 }
                                             }
                                             spdlog::info("RdoMediaLoader: MOV loaded for {}", media_name);
@@ -255,8 +267,6 @@ class MediaLoaderWorker : public caf::event_based_actor {
                     spdlog::warn("RdoMediaLoader: step1: {}", to_string(err));
                 });
     }
-
-    caf::actor session_;
 };
 
 
@@ -271,20 +281,8 @@ class RdoMediaLoaderPlugin : public xstudio::plugin::StandardPlugin {
             RdoMediaLoaderRegistry, caf::actor_cast<caf::actor>(this));
         spdlog::info("RdoMediaLoader: registered as {}", RdoMediaLoaderRegistry);
 
-        // Resolve session actor for set_viewer support
-        try {
-            caf::scoped_actor sys{system()};
-            auto studio = system().registry().template get<caf::actor>(studio_registry);
-            if (studio) {
-                session_ = request_receive<caf::actor>(
-                    *sys, studio, session::session_atom_v);
-            }
-        } catch (const std::exception &e) {
-            spdlog::warn("RdoMediaLoader: could not resolve session: {}", e.what());
-        }
-
         for (int i = 0; i < 4; ++i) {
-            auto w = spawn<MediaLoaderWorker>(session_);
+            auto w = spawn<MediaLoaderWorker>();
             link_to(w);
             workers_.push_back(w);
         }
@@ -309,7 +307,6 @@ class RdoMediaLoaderPlugin : public xstudio::plugin::StandardPlugin {
     }
 
   private:
-    caf::actor session_;
     std::vector<caf::actor> workers_;
     size_t next_worker_{0};
 };
