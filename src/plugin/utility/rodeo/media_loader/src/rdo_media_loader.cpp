@@ -155,116 +155,172 @@ class MediaLoaderWorker : public caf::event_based_actor {
         auto media_name  = payload.value("version_name", std::string("unknown"));
         auto set_viewer  = payload.value("set_viewer", false);
 
-        // Phase 1: Create MOV source → add to playlist IMMEDIATELY.
-        // This matches the Python sync path where the MOV appears in the
-        // viewport within ~0.1s. EXR is added later in Phase 2.
-        mail(media::add_media_source_atom_v, movie_path, rate, true)
+        if (!movie_path.empty()) {
+            // MOV available: load MOV as primary, EXR as secondary.
+            mail(media::add_media_source_atom_v, movie_path, rate, true)
+                .request(caf::actor_cast<caf::actor>(this), caf::infinite)
+                .then(
+                    [=, this](const UuidActor &mov_ua) mutable {
+                        if (mov_ua.uuid().is_null()) {
+                            // MOV creation failed — fall back to EXR-only.
+                            if (!frames_path.empty()) {
+                                spdlog::info("RdoMediaLoader: MOV failed, falling back to EXR for {}", media_name);
+                                load_exr_primary(frames_path, frame_range, media_name, set_viewer, playlist, subset, payload, rate);
+                            } else {
+                                spdlog::warn("RdoMediaLoader: no sources for {}", media_name);
+                            }
+                            return;
+                        }
+                        add_to_playlist(mov_ua, media_name, set_viewer, playlist, subset, payload, frames_path, frame_range, rate);
+                    },
+                    [=, this](caf::error &err) mutable {
+                        spdlog::warn("RdoMediaLoader: MOV step failed: {}", to_string(err));
+                        if (!frames_path.empty()) {
+                            load_exr_primary(frames_path, frame_range, media_name, set_viewer, playlist, subset, payload, rate);
+                        }
+                    });
+        } else if (!frames_path.empty()) {
+            // No MOV: load EXR as primary source.
+            load_exr_primary(frames_path, frame_range, media_name, set_viewer, playlist, subset, payload, rate);
+        } else {
+            spdlog::warn("RdoMediaLoader: no sources for {}", media_name);
+        }
+    }
+
+    // Load EXR as the primary (and only) source.
+    void load_exr_primary(
+        const std::string &frames_path,
+        const std::string &frame_range,
+        const std::string &media_name,
+        bool set_viewer,
+        caf::actor playlist,
+        caf::actor subset,
+        const JsonStore &payload,
+        const FrameRate &rate) {
+
+        spdlog::info("RdoMediaLoader: loading EXR as primary for {}", media_name);
+        mail(media::add_media_source_atom_v, frames_path, frame_range, rate)
             .request(caf::actor_cast<caf::actor>(this), caf::infinite)
             .then(
-                [=, this](const UuidActor &mov_ua) mutable {
-                    if (mov_ua.uuid().is_null()) {
-                        spdlog::warn("RdoMediaLoader: no MOV source for {}", media_name);
+                [=, this](const UuidActor &exr_ua) mutable {
+                    if (exr_ua.uuid().is_null()) {
+                        spdlog::warn("RdoMediaLoader: EXR creation failed for {}", media_name);
                         return;
                     }
+                    // No secondary source when EXR is primary.
+                    add_to_playlist(exr_ua, media_name, set_viewer, playlist, subset, payload, "", "", rate);
+                },
+                [=](caf::error &err) {
+                    spdlog::warn("RdoMediaLoader: EXR primary: {}", to_string(err));
+                });
+    }
 
-                    // Create media with MOV source only → add to playlist now.
-                    auto media_uuid  = Uuid::generate();
-                    auto media_actor = spawn<media::MediaActor>(
-                        media_name, media_uuid, UuidActorVector());
+    // Common path: given a primary source, create the media actor,
+    // add to playlist/subset, set metadata, set viewer, and optionally
+    // add a secondary EXR source.
+    void add_to_playlist(
+        const UuidActor &primary_ua,
+        const std::string &media_name,
+        bool set_viewer,
+        caf::actor playlist,
+        caf::actor subset,
+        const JsonStore &payload,
+        const std::string &secondary_frames_path,
+        const std::string &secondary_frame_range,
+        const FrameRate &rate) {
 
-                    UuidActorVector mov_vec;
-                    mov_vec.push_back(mov_ua);
+        auto media_uuid  = Uuid::generate();
+        auto media_actor = spawn<media::MediaActor>(
+            media_name, media_uuid, UuidActorVector());
 
-                    mail(media::add_media_source_atom_v, mov_vec)
-                        .request(media_actor, std::chrono::seconds(10))
+        UuidActorVector src_vec;
+        src_vec.push_back(primary_ua);
+
+        mail(media::add_media_source_atom_v, src_vec)
+            .request(media_actor, std::chrono::seconds(10))
+            .then(
+                [=, this](bool) mutable {
+                    anon_mail(utility::name_atom_v, media_name).send(media_actor);
+
+                    if (payload.find("metadata") != payload.end()) {
+                        anon_mail(
+                            json_store::set_json_atom_v, Uuid(),
+                            JsonStore(payload["metadata"]),
+                            std::string("/shotgrid"))
+                            .send(media_actor);
+                    }
+
+                    auto media_ua = UuidActor(media_uuid, media_actor);
+                    UuidActorVector media_vec;
+                    media_vec.push_back(media_ua);
+
+                    mail(playlist::add_media_atom_v, media_vec, Uuid())
+                        .request(playlist, std::chrono::seconds(10))
                         .then(
                             [=, this](bool) mutable {
-                                anon_mail(utility::name_atom_v, media_name).send(media_actor);
-
-                                if (payload.find("metadata") != payload.end()) {
-                                    anon_mail(
-                                        json_store::set_json_atom_v, Uuid(),
-                                        JsonStore(payload["metadata"]),
-                                        std::string("/shotgrid"))
-                                        .send(media_actor);
+                                if (subset) {
+                                    anon_mail(playlist::add_media_atom_v, media_ua, Uuid())
+                                        .send(subset);
+                                    anon_mail(playlist::select_media_atom_v, UuidList({media_uuid}))
+                                        .send(subset);
+                                    if (set_viewer) {
+                                        set_viewer_to_subset(subset, media_name);
+                                    }
                                 }
+                                spdlog::info("RdoMediaLoader: loaded {} (primary source)", media_name);
 
-                                // Add to playlist NOW — MOV is viewable.
-                                auto media_ua = UuidActor(media_uuid, media_actor);
-                                UuidActorVector media_vec;
-                                media_vec.push_back(media_ua);
-
-                                mail(playlist::add_media_atom_v, media_vec, Uuid())
-                                    .request(playlist, std::chrono::seconds(10))
-                                    .then(
-                                        [=, this](bool) mutable {
-                                            if (subset) {
-                                                anon_mail(playlist::add_media_atom_v, media_ua, Uuid())
-                                                    .send(subset);
-                                                // Select the new media so the viewport updates
-                                                anon_mail(playlist::select_media_atom_v, UuidList({media_uuid}))
-                                                    .send(subset);
-                                                // Switch viewport to this subset AFTER media is in it
-                                                // (avoids black flash from switching to an empty subset).
-                                                // Resolve session lazily — it may not exist at plugin startup.
-                                                if (set_viewer) {
-                                                    auto studio = system().registry().template get<caf::actor>(studio_registry);
-                                                    if (studio) {
-                                                        mail(session::session_atom_v)
-                                                            .request(studio, std::chrono::seconds(5))
-                                                            .then(
-                                                                [=, this](caf::actor session) {
-                                                                    mail(utility::uuid_atom_v)
-                                                                        .request(subset, std::chrono::seconds(5))
-                                                                        .then(
-                                                                            [=](const Uuid &subset_uuid) {
-                                                                                anon_mail(
-                                                                                    session::viewport_active_media_container_atom_v,
-                                                                                    subset_uuid)
-                                                                                    .send(session);
-                                                                                spdlog::info("RdoMediaLoader: set viewer to subset");
-                                                                            },
-                                                                            [=](caf::error &err) {
-                                                                                spdlog::warn("RdoMediaLoader: set_viewer UUID failed: {}", to_string(err));
-                                                                            });
-                                                                },
-                                                                [=](caf::error &err) {
-                                                                    spdlog::warn("RdoMediaLoader: set_viewer session lookup failed: {}", to_string(err));
-                                                                });
-                                                    }
+                                // Add secondary EXR source in background.
+                                if (!secondary_frames_path.empty()) {
+                                    mail(media::add_media_source_atom_v, secondary_frames_path, secondary_frame_range, rate)
+                                        .request(caf::actor_cast<caf::actor>(this), caf::infinite)
+                                        .then(
+                                            [=](const UuidActor &exr_ua) mutable {
+                                                if (!exr_ua.uuid().is_null()) {
+                                                    UuidActorVector exr_vec;
+                                                    exr_vec.push_back(exr_ua);
+                                                    anon_mail(media::add_media_source_atom_v, exr_vec)
+                                                        .send(media_actor);
+                                                    spdlog::info("RdoMediaLoader: EXR added for {}", media_name);
                                                 }
-                                            }
-                                            spdlog::info("RdoMediaLoader: MOV loaded for {}", media_name);
-
-                                            // Phase 2: Add EXR source in background.
-                                            if (!frames_path.empty()) {
-                                                mail(media::add_media_source_atom_v, frames_path, frame_range, rate)
-                                                    .request(caf::actor_cast<caf::actor>(this), caf::infinite)
-                                                    .then(
-                                                        [=](const UuidActor &exr_ua) mutable {
-                                                            if (!exr_ua.uuid().is_null()) {
-                                                                UuidActorVector exr_vec;
-                                                                exr_vec.push_back(exr_ua);
-                                                                anon_mail(media::add_media_source_atom_v, exr_vec)
-                                                                    .send(media_actor);
-                                                                spdlog::info("RdoMediaLoader: EXR added for {}", media_name);
-                                                            }
-                                                        },
-                                                        [=](caf::error &err) {
-                                                            spdlog::warn("RdoMediaLoader: EXR: {}", to_string(err));
-                                                        });
-                                            }
-                                        },
-                                        [=](caf::error &err) {
-                                            spdlog::warn("RdoMediaLoader: playlist add: {}", to_string(err));
-                                        });
+                                            },
+                                            [=](caf::error &err) {
+                                                spdlog::warn("RdoMediaLoader: EXR secondary: {}", to_string(err));
+                                            });
+                                }
                             },
                             [=](caf::error &err) {
-                                spdlog::warn("RdoMediaLoader: MOV sources: {}", to_string(err));
+                                spdlog::warn("RdoMediaLoader: playlist add: {}", to_string(err));
                             });
                 },
                 [=](caf::error &err) {
-                    spdlog::warn("RdoMediaLoader: step1: {}", to_string(err));
+                    spdlog::warn("RdoMediaLoader: add source: {}", to_string(err));
+                });
+    }
+
+    // Set the viewport to the given subset.
+    void set_viewer_to_subset(caf::actor subset, const std::string &media_name) {
+        auto studio = system().registry().template get<caf::actor>(studio_registry);
+        if (!studio) return;
+        mail(session::session_atom_v)
+            .request(studio, std::chrono::seconds(5))
+            .then(
+                [=, this](caf::actor session) {
+                    mail(utility::uuid_atom_v)
+                        .request(subset, std::chrono::seconds(5))
+                        .then(
+                            [=](const Uuid &subset_uuid) {
+                                anon_mail(
+                                    session::viewport_active_media_container_atom_v,
+                                    subset_uuid)
+                                    .send(session);
+                                spdlog::info("RdoMediaLoader: set viewer to subset");
+                            },
+                            [=](caf::error &err) {
+                                spdlog::warn("RdoMediaLoader: set_viewer UUID failed: {}", to_string(err));
+                            });
+                },
+                [=](caf::error &err) {
+                    spdlog::warn("RdoMediaLoader: set_viewer session lookup failed: {}", to_string(err));
                 });
     }
 };
