@@ -24,14 +24,6 @@
 #include "xstudio/utility/json_store.hpp"
 #include "xstudio/utility/uuid.hpp"
 
-// Sleep/wake detection via time-jump watchdog.
-// A background thread sleeps for N seconds, then checks if wall-clock time
-// advanced by significantly more than N. If so, the system slept.
-// Works on all platforms without ObjC/platform APIs.
-#include <thread>
-#include <atomic>
-#include <chrono>
-
 using namespace xstudio;
 using namespace xstudio::utility;
 
@@ -294,36 +286,9 @@ class RdoMediaLoaderPlugin : public xstudio::plugin::StandardPlugin {
             link_to(w);
             workers_.push_back(w);
         }
-
-        // Sleep/wake watchdog: a thread sleeps for 5s intervals and checks
-        // if wall-clock time jumped by more than 10s (system slept).
-        wake_running_ = true;
-        auto self_actor = caf::actor_cast<caf::actor>(this);
-        wake_thread_ = std::thread([this, self_actor]() {
-            using clock = std::chrono::steady_clock;
-            constexpr auto interval = std::chrono::seconds(5);
-            constexpr auto threshold = std::chrono::seconds(10);
-
-            while (wake_running_.load()) {
-                auto before = clock::now();
-                std::this_thread::sleep_for(interval);
-                auto elapsed = clock::now() - before;
-
-                if (elapsed > threshold && wake_running_.load()) {
-                    spdlog::info("RdoMediaLoader: system wake detected (slept {}s)",
-                        std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
-                    anon_send(self_actor, utility::event_atom_v, std::string("system_wake"));
-                }
-            }
-        });
-        spdlog::info("RdoMediaLoader: sleep/wake watchdog active");
     }
 
-    ~RdoMediaLoaderPlugin() override {
-        wake_running_ = false;
-        if (wake_thread_.joinable())
-            wake_thread_.join();
-    }
+    ~RdoMediaLoaderPlugin() override = default;
 
     caf::message_handler message_handler_extensions() override {
         return {
@@ -338,36 +303,12 @@ class RdoMediaLoaderPlugin : public xstudio::plugin::StandardPlugin {
                     std::move(playlist), std::move(subset), rate)
                     .send(worker);
             },
-
-            // Python plugins register to receive wake notifications.
-            [=](utility::event_atom, const std::string &event_name) {
-                if (event_name == "register_wake_listener") {
-                    // Sender is the Python plugin actor — store it.
-                    auto sender = current_sender();
-                    if (sender) {
-                        wake_listeners_.push_back(caf::actor_cast<caf::actor>(sender));
-                        spdlog::info("RdoMediaLoader: registered wake listener (total: {})",
-                                     wake_listeners_.size());
-                    }
-                } else if (event_name == "system_wake") {
-                    // Broadcast wake to all registered Python plugins.
-                    for (auto &listener : wake_listeners_) {
-                        anon_mail(utility::event_atom_v, std::string("system_wake"))
-                            .send(listener);
-                    }
-                    spdlog::info("RdoMediaLoader: broadcasted wake to {} listeners",
-                                 wake_listeners_.size());
-                }
-            },
         };
     }
 
   private:
     std::vector<caf::actor> workers_;
-    std::vector<caf::actor> wake_listeners_;
     size_t next_worker_{0};
-    std::atomic<bool> wake_running_{false};
-    std::thread wake_thread_;
 };
 
 } // anonymous namespace
