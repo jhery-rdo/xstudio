@@ -339,24 +339,12 @@ class RdoMediaLoaderPlugin : public xstudio::plugin::StandardPlugin {
                     .send(worker);
             },
 
-            // Python plugins register to receive wake notifications.
+            // Wake event from watchdog thread → broadcast to event group.
+            // Python plugins subscribe via subscribe_to_event_group(loader, callback).
             [=](utility::event_atom, const std::string &event_name) {
-                if (event_name == "register_wake_listener") {
-                    // Sender is the Python plugin actor — store it.
-                    auto sender = current_sender();
-                    if (sender) {
-                        wake_listeners_.push_back(caf::actor_cast<caf::actor>(sender));
-                        spdlog::info("RdoMediaLoader: registered wake listener (total: {})",
-                                     wake_listeners_.size());
-                    }
-                } else if (event_name == "system_wake") {
-                    // Broadcast wake to all registered Python plugins.
-                    for (auto &listener : wake_listeners_) {
-                        anon_mail(utility::event_atom_v, std::string("system_wake"))
-                            .send(listener);
-                    }
-                    spdlog::info("RdoMediaLoader: broadcasted wake to {} listeners",
-                                 wake_listeners_.size());
+                if (event_name == "system_wake") {
+                    send_event_group(utility::event_atom_v, std::string("system_wake"));
+                    spdlog::info("RdoMediaLoader: broadcasted system_wake to event group");
                 }
             },
         };
@@ -364,7 +352,6 @@ class RdoMediaLoaderPlugin : public xstudio::plugin::StandardPlugin {
 
   private:
     std::vector<caf::actor> workers_;
-    std::vector<caf::actor> wake_listeners_;
     size_t next_worker_{0};
     std::atomic<bool> wake_running_{false};
     std::thread wake_thread_;
