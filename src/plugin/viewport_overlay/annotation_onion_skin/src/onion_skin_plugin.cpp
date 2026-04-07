@@ -92,26 +92,28 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
     if (want_before == 0 && want_after == 0)
         return {};
 
-    const auto &all_bookmarks = image.all_timeline_bookmarks();
-    if (all_bookmarks.empty())
-        return {};
+    // ── Update bookmark cache with current frame's bookmarks ──
+    // Each frame carries its own bookmarks (set by SubPlayhead). We store
+    // them keyed by logical frame so we can look up neighbors later.
+    {
+        const auto &frame_bookmarks = image.bookmarks();
+        if (!frame_bookmarks.empty()) {
+            std::lock_guard<std::mutex> lock(cache_mutex_);
+            frame_bookmark_cache_[current_frame] = frame_bookmarks;
+        }
+    }
 
-    // Collect annotated frames from the full timeline bookmark set.
-    // Bookmarks are sorted by start_frame_ (done by SubPlayhead).
-
-    // Helper: blend a colour toward a tint
+    // ── Find neighbor annotations from cache ──
     auto tint_colour = [](const utility::ColourTriplet &c,
                           const utility::ColourTriplet &tint) -> utility::ColourTriplet {
         return {c.r * tint.r, c.g * tint.g, c.b * tint.b};
     };
 
-    // Helper: create a Canvas copy with opacity and tint baked into every item
     auto make_tinted_canvas = [&](const ui::canvas::Canvas &src, float opacity,
                                   const utility::ColourTriplet &tint) -> ui::canvas::Canvas {
-        ui::canvas::Canvas out(src); // copy
-        // Iterate and replace each item with a tinted version
+        ui::canvas::Canvas out(src);
         for (auto it = out.begin(); it != out.end(); ++it) {
-            auto item = *it; // copy the variant
+            auto item = *it;
             std::visit(
                 [&](auto &v) {
                     using T = std::decay_t<decltype(v)>;
@@ -123,7 +125,6 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
                         v.set_colour(tint_colour(v.colour(), tint));
                         v.set_bg_opacity(v.background_opacity() * opacity);
                     } else {
-                        // Quad, Polygon, Ellipse — public members
                         v.opacity *= opacity;
                         v.colour = tint_colour(v.colour, tint);
                     }
@@ -138,7 +139,6 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
         return base_opac * std::pow(falloff, static_cast<float>(distance - 1));
     };
 
-    // Collect canvases: farthest first, nearest last
     struct Candidate {
         const ui::canvas::Canvas *canvas;
         int abs_distance;
@@ -147,54 +147,63 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
     };
     std::vector<Candidate> candidates;
 
-    // Walk backward for past annotations
-    if (want_before > 0) {
-        int found = 0;
-        for (auto it = all_bookmarks.rbegin();
-             it != all_bookmarks.rend() && found < want_before; ++it) {
-            const auto &bm = *it;
-            if (!bm || !bm->annotation_ || !bm->annotation_->user_data())
-                continue;
-            if (bm->end_frame_ >= current_frame)
-                continue;
-            const auto *canvas =
-                static_cast<const ui::canvas::Canvas *>(bm->annotation_->user_data());
-            if (!canvas || canvas->empty())
-                continue;
-            found++;
-            candidates.push_back(
-                {canvas, current_frame - bm->end_frame_, compute_opacity(found), prev_colour});
-        }
-    }
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
 
-    // Walk forward for future annotations
-    if (want_after > 0) {
-        int found = 0;
-        for (auto it = all_bookmarks.begin();
-             it != all_bookmarks.end() && found < want_after; ++it) {
-            const auto &bm = *it;
-            if (!bm || !bm->annotation_ || !bm->annotation_->user_data())
-                continue;
-            if (bm->start_frame_ <= current_frame)
-                continue;
-            const auto *canvas =
-                static_cast<const ui::canvas::Canvas *>(bm->annotation_->user_data());
-            if (!canvas || canvas->empty())
-                continue;
-            found++;
-            candidates.push_back(
-                {canvas, bm->start_frame_ - current_frame, compute_opacity(found), next_colour});
+        // Walk backward for past annotations
+        if (want_before > 0) {
+            int found = 0;
+            auto it = frame_bookmark_cache_.find(current_frame);
+            if (it != frame_bookmark_cache_.begin()) {
+                auto pit = it;
+                while (pit != frame_bookmark_cache_.begin() && found < want_before) {
+                    --pit;
+                    for (const auto &bm : pit->second) {
+                        if (!bm || !bm->annotation_ || !bm->annotation_->user_data())
+                            continue;
+                        const auto *canvas = static_cast<const ui::canvas::Canvas *>(
+                            bm->annotation_->user_data());
+                        if (!canvas || canvas->empty())
+                            continue;
+                        found++;
+                        candidates.push_back(
+                            {canvas, current_frame - pit->first,
+                             compute_opacity(found), prev_colour});
+                        break; // one annotation per frame
+                    }
+                }
+            }
         }
-    }
+
+        // Walk forward for future annotations
+        if (want_after > 0) {
+            int found = 0;
+            auto it = frame_bookmark_cache_.upper_bound(current_frame);
+            while (it != frame_bookmark_cache_.end() && found < want_after) {
+                for (const auto &bm : it->second) {
+                    if (!bm || !bm->annotation_ || !bm->annotation_->user_data())
+                        continue;
+                    const auto *canvas = static_cast<const ui::canvas::Canvas *>(
+                        bm->annotation_->user_data());
+                    if (!canvas || canvas->empty())
+                        continue;
+                    found++;
+                    candidates.push_back(
+                        {canvas, it->first - current_frame,
+                         compute_opacity(found), next_colour});
+                    break;
+                }
+                ++it;
+            }
+        }
+    } // release cache lock
 
     if (candidates.empty())
         return {};
 
-    // Sort farthest-to-nearest so nearest draws on top
     std::sort(candidates.begin(), candidates.end(),
               [](const auto &a, const auto &b) { return a.abs_distance > b.abs_distance; });
 
-    // Build tinted canvas copies
     std::vector<ui::canvas::Canvas> canvases;
     canvases.reserve(candidates.size());
     for (const auto &c : candidates) {

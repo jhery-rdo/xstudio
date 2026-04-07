@@ -231,13 +231,6 @@ namespace media_reader {
             transient_data().bookmarks_ = bookmarks;
         }
 
-        [[nodiscard]] const bookmark::BookmarkAndAnnotations &all_timeline_bookmarks() const {
-            return transient_data().all_timeline_bookmarks_;
-        }
-        void set_all_timeline_bookmarks(const bookmark::BookmarkAndAnnotations &bookmarks) {
-            transient_data().all_timeline_bookmarks_ = bookmarks;
-        }
-
         [[nodiscard]] const media::AVFrameID &frame_id() const {
             return transient_data().frame_id_;
         }
@@ -308,7 +301,6 @@ namespace media_reader {
             timebase::flicks tts_ = timebase::flicks{0};
             media::AVFrameID frame_id_;
             bookmark::BookmarkAndAnnotations bookmarks_;
-            bookmark::BookmarkAndAnnotations all_timeline_bookmarks_;
             int playhead_logical_frame_    = 0;
             int playhead_logical_duration_ = 0;
             bool invisible_                = {false};
