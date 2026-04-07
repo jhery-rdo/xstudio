@@ -93,6 +93,18 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
     if (want_before == 0 && want_after == 0)
         return {};
 
+    // ── Clear cache when media changes ──
+    // Logical frame numbers overlap between media items, so we must
+    // discard stale entries when the viewed media changes.
+    const auto &media_id = image.frame_id().media_uuid();
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        if (media_id != cached_media_uuid_) {
+            frame_bookmark_cache_.clear();
+            cached_media_uuid_ = media_id;
+        }
+    }
+
     // ── Update bookmark cache with current frame's bookmarks ──
     // Each frame carries its own bookmarks (set by SubPlayhead). We store
     // them keyed by logical frame so we can look up neighbors later.

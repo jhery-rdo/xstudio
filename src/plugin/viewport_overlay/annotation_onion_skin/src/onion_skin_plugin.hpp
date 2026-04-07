@@ -47,6 +47,7 @@ namespace ui {
             // frame.bookmarks() as the user scrubs. Avoids any core changes.
             mutable std::mutex cache_mutex_;
             mutable std::map<int, bookmark::BookmarkAndAnnotations> frame_bookmark_cache_;
+            mutable utility::Uuid cached_media_uuid_;
         };
 
     } // namespace viewport
