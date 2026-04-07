@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <variant>
 
 using namespace xstudio;
 using namespace xstudio::ui::viewport;
@@ -97,85 +98,110 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
 
     // Collect annotated frames from the full timeline bookmark set.
     // Bookmarks are sorted by start_frame_ (done by SubPlayhead).
-    // We walk backward and forward from the current frame position to find
-    // the nearest annotated neighbor frames.
 
-    std::vector<NeighborAnnotation> neighbors;
+    // Helper: blend a colour toward a tint
+    auto tint_colour = [](const utility::ColourTriplet &c,
+                          const utility::ColourTriplet &tint) -> utility::ColourTriplet {
+        return {c.r * tint.r, c.g * tint.g, c.b * tint.b};
+    };
 
-    // Helper: compute opacity for a given distance from current frame
+    // Helper: create a Canvas copy with opacity and tint baked into every item
+    auto make_tinted_canvas = [&](const ui::canvas::Canvas &src, float opacity,
+                                  const utility::ColourTriplet &tint) -> ui::canvas::Canvas {
+        ui::canvas::Canvas out(src); // copy
+        // Iterate and replace each item with a tinted version
+        for (auto it = out.begin(); it != out.end(); ++it) {
+            auto item = *it; // copy the variant
+            std::visit(
+                [&](auto &v) {
+                    using T = std::decay_t<decltype(v)>;
+                    if constexpr (std::is_same_v<T, ui::canvas::Stroke>) {
+                        v.set_opacity(v.opacity() * opacity);
+                        v.set_colour(tint_colour(v.colour(), tint));
+                    } else if constexpr (std::is_same_v<T, ui::canvas::Caption>) {
+                        v.set_opacity(v.opacity() * opacity);
+                        v.set_colour(tint_colour(v.colour(), tint));
+                        v.set_bg_opacity(v.background_opacity() * opacity);
+                    } else {
+                        // Quad, Polygon, Ellipse — public members
+                        v.opacity *= opacity;
+                        v.colour = tint_colour(v.colour, tint);
+                    }
+                },
+                item);
+            out.overwrite_item(it, item);
+        }
+        return out;
+    };
+
     auto compute_opacity = [&](int distance) -> float {
         return base_opac * std::pow(falloff, static_cast<float>(distance - 1));
     };
 
-    // Find past annotations (walk backward)
+    // Collect canvases: farthest first, nearest last
+    struct Candidate {
+        const ui::canvas::Canvas *canvas;
+        int abs_distance;
+        float opacity;
+        utility::ColourTriplet tint;
+    };
+    std::vector<Candidate> candidates;
+
+    // Walk backward for past annotations
     if (want_before > 0) {
         int found = 0;
-        // Iterate backward through bookmarks to find annotated frames before current
-        for (auto it = all_bookmarks.rbegin(); it != all_bookmarks.rend() && found < want_before;
-             ++it) {
+        for (auto it = all_bookmarks.rbegin();
+             it != all_bookmarks.rend() && found < want_before; ++it) {
             const auto &bm = *it;
             if (!bm || !bm->annotation_ || !bm->annotation_->user_data())
                 continue;
-            // This bookmark's frame range must be entirely before the current frame
             if (bm->end_frame_ >= current_frame)
                 continue;
-
-            // Access the Canvas via the public user_data() API
             const auto *canvas =
                 static_cast<const ui::canvas::Canvas *>(bm->annotation_->user_data());
             if (!canvas || canvas->empty())
                 continue;
-
-            int offset = bm->end_frame_ - current_frame; // negative
             found++;
-
-            NeighborAnnotation na;
-            na.canvas       = *canvas;
-            na.frame_offset = offset;
-            na.opacity      = compute_opacity(found);
-            na.tint = Imath::V3f(prev_colour.r, prev_colour.g, prev_colour.b);
-            neighbors.push_back(std::move(na));
+            candidates.push_back(
+                {canvas, current_frame - bm->end_frame_, compute_opacity(found), prev_colour});
         }
     }
 
-    // Find future annotations (walk forward)
+    // Walk forward for future annotations
     if (want_after > 0) {
         int found = 0;
-        for (auto it = all_bookmarks.begin(); it != all_bookmarks.end() && found < want_after;
-             ++it) {
+        for (auto it = all_bookmarks.begin();
+             it != all_bookmarks.end() && found < want_after; ++it) {
             const auto &bm = *it;
             if (!bm || !bm->annotation_ || !bm->annotation_->user_data())
                 continue;
-            // This bookmark's frame range must be entirely after the current frame
             if (bm->start_frame_ <= current_frame)
                 continue;
-
             const auto *canvas =
                 static_cast<const ui::canvas::Canvas *>(bm->annotation_->user_data());
             if (!canvas || canvas->empty())
                 continue;
-
-            int offset = bm->start_frame_ - current_frame; // positive
             found++;
-
-            NeighborAnnotation na;
-            na.canvas       = *canvas;
-            na.frame_offset = offset;
-            na.opacity      = compute_opacity(found);
-            na.tint = Imath::V3f(next_colour.r, next_colour.g, next_colour.b);
-            neighbors.push_back(std::move(na));
+            candidates.push_back(
+                {canvas, bm->start_frame_ - current_frame, compute_opacity(found), next_colour});
         }
     }
 
-    if (neighbors.empty())
+    if (candidates.empty())
         return {};
 
     // Sort farthest-to-nearest so nearest draws on top
-    std::sort(neighbors.begin(), neighbors.end(), [](const auto &a, const auto &b) {
-        return std::abs(a.frame_offset) > std::abs(b.frame_offset);
-    });
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto &a, const auto &b) { return a.abs_distance > b.abs_distance; });
 
-    return std::make_shared<OnionSkinRenderData>(std::move(neighbors));
+    // Build tinted canvas copies
+    std::vector<ui::canvas::Canvas> canvases;
+    canvases.reserve(candidates.size());
+    for (const auto &c : candidates) {
+        canvases.push_back(make_tinted_canvas(*c.canvas, c.opacity, c.tint));
+    }
+
+    return std::make_shared<OnionSkinRenderData>(std::move(canvases));
 }
 
 

@@ -3,8 +3,6 @@
 
 #include <vector>
 
-#include <Imath/ImathVec.h>
-
 #include "xstudio/ui/canvas/canvas.hpp"
 #include "xstudio/utility/blind_data.hpp"
 
@@ -13,21 +11,16 @@ namespace xstudio {
 namespace ui {
     namespace viewport {
 
-        struct NeighborAnnotation {
-            canvas::Canvas canvas;
-            int frame_offset{0};
-            float opacity{0.0f};
-            Imath::V3f tint{1.0f, 1.0f, 1.0f};
-        };
-
+        // Each neighbor canvas has opacity and tint baked into its items,
+        // so it can be rendered directly with no FBO compositing.
         class OnionSkinRenderData : public utility::BlindDataObject {
           public:
             OnionSkinRenderData() = default;
-            explicit OnionSkinRenderData(std::vector<NeighborAnnotation> n)
-                : neighbors(std::move(n)) {}
+            explicit OnionSkinRenderData(std::vector<canvas::Canvas> c)
+                : canvases(std::move(c)) {}
             ~OnionSkinRenderData() override = default;
 
-            std::vector<NeighborAnnotation> neighbors;
+            std::vector<canvas::Canvas> canvases; // farthest-to-nearest order
         };
 
     } // namespace viewport
