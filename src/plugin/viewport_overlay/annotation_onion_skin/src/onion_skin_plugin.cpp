@@ -18,15 +18,16 @@ OnionSkinPlugin::OnionSkinPlugin(
     caf::actor_config &cfg, const utility::JsonStore &init_settings)
     : plugin::HUDPluginBase(cfg, "Annotation Onion Skin", init_settings, 10.0f) {
 
-    frames_before_ = add_integer_attribute("Frames Before", "Before", 2, 0, 5);
+    frames_before_ = add_integer_attribute("Frames Before", "Before", 3, 0, 20);
     add_hud_settings_attribute(frames_before_);
     frames_before_->set_tool_tip(
-        "Number of previous annotated frames to show as onion skins");
+        "Maximum frame distance to look back for annotations");
     frames_before_->set_redraw_viewport_on_change(true);
 
-    frames_after_ = add_integer_attribute("Frames After", "After", 2, 0, 5);
+    frames_after_ = add_integer_attribute("Frames After", "After", 3, 0, 20);
     add_hud_settings_attribute(frames_after_);
-    frames_after_->set_tool_tip("Number of future annotated frames to show as onion skins");
+    frames_after_->set_tool_tip(
+        "Maximum frame distance to look ahead for annotations");
     frames_after_->set_redraw_viewport_on_change(true);
 
     base_opacity_ =
@@ -41,6 +42,14 @@ OnionSkinPlugin::OnionSkinPlugin(
     opacity_falloff_->set_tool_tip(
         "Multiplier applied per frame step further from current frame");
     opacity_falloff_->set_redraw_viewport_on_change(true);
+
+    use_original_colours_ = add_boolean_attribute(
+        "Use Original Colours", "Orig Colours", false);
+    add_hud_settings_attribute(use_original_colours_);
+    use_original_colours_->set_tool_tip(
+        "When enabled, keep annotation colours and only reduce opacity. "
+        "When disabled, tint with Previous/Next colours.");
+    use_original_colours_->set_redraw_viewport_on_change(true);
 
     past_tint_ = add_colour_attribute(
         "Previous Tint", "Prev Tint", utility::ColourTriplet(1.0f, 0.3f, 0.3f));
@@ -62,6 +71,7 @@ OnionSkinPlugin::OnionSkinPlugin(
     frames_after_->set_preference_path("/plugin/annotation_onion_skin/frames_after");
     base_opacity_->set_preference_path("/plugin/annotation_onion_skin/base_opacity");
     opacity_falloff_->set_preference_path("/plugin/annotation_onion_skin/opacity_falloff");
+    use_original_colours_->set_preference_path("/plugin/annotation_onion_skin/use_original_colours");
     past_tint_->set_preference_path("/plugin/annotation_onion_skin/past_tint");
     future_tint_->set_preference_path("/plugin/annotation_onion_skin/future_tint");
 }
@@ -81,15 +91,16 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
     if (!visible() || !image)
         return {};
 
-    const int current_frame  = image.playhead_logical_frame();
-    const int want_before    = static_cast<int>(frames_before_->value());
-    const int want_after     = static_cast<int>(frames_after_->value());
-    const float base_opac    = base_opacity_->value();
-    const float falloff      = opacity_falloff_->value();
-    const auto &prev_colour  = past_tint_->value();
-    const auto &next_colour  = future_tint_->value();
+    const int current_frame   = image.playhead_logical_frame();
+    const int range_before    = static_cast<int>(frames_before_->value());
+    const int range_after     = static_cast<int>(frames_after_->value());
+    const float base_opac     = base_opacity_->value();
+    const float falloff       = opacity_falloff_->value();
+    const bool orig_colours   = use_original_colours_->value();
+    const auto &prev_colour   = past_tint_->value();
+    const auto &next_colour   = future_tint_->value();
 
-    if (want_before == 0 && want_after == 0)
+    if (range_before == 0 && range_after == 0)
         return {};
 
     // ── Update bookmark cache ──
@@ -105,7 +116,6 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
 
         auto it = frame_bookmark_cache_.find(current_frame);
         if (it != frame_bookmark_cache_.end()) {
-            // Compare cached bookmarks with current — detect changes.
             bool changed = (it->second.size() != frame_bookmarks.size());
             if (!changed) {
                 for (size_t i = 0; i < it->second.size(); ++i) {
@@ -121,7 +131,6 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
             }
         }
 
-        // Update cache for current frame.
         if (!frame_bookmarks.empty()) {
             frame_bookmark_cache_[current_frame] = frame_bookmarks;
         } else {
@@ -143,8 +152,9 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
         return {c.r * tint.r, c.g * tint.g, c.b * tint.b};
     };
 
-    auto make_tinted_canvas = [&](const ui::canvas::Canvas &src, float opacity,
-                                  const utility::ColourTriplet &tint) -> ui::canvas::Canvas {
+    auto make_canvas_copy = [&](const ui::canvas::Canvas &src, float opacity,
+                                const utility::ColourTriplet &tint,
+                                bool keep_original) -> ui::canvas::Canvas {
         ui::canvas::Canvas out(src);
         for (auto it = out.begin(); it != out.end(); ++it) {
             auto item = *it;
@@ -153,14 +163,17 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
                     using T = std::decay_t<decltype(v)>;
                     if constexpr (std::is_same_v<T, ui::canvas::Stroke>) {
                         v.set_opacity(v.opacity() * opacity);
-                        v.set_colour(tint_colour(v.colour(), tint));
+                        if (!keep_original)
+                            v.set_colour(tint_colour(v.colour(), tint));
                     } else if constexpr (std::is_same_v<T, ui::canvas::Caption>) {
                         v.set_opacity(v.opacity() * opacity);
-                        v.set_colour(tint_colour(v.colour(), tint));
                         v.set_bg_opacity(v.background_opacity() * opacity);
+                        if (!keep_original)
+                            v.set_colour(tint_colour(v.colour(), tint));
                     } else {
                         v.opacity *= opacity;
-                        v.colour = tint_colour(v.colour, tint);
+                        if (!keep_original)
+                            v.colour = tint_colour(v.colour, tint);
                     }
                 },
                 item);
@@ -169,11 +182,12 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
         return out;
     };
 
+    // Opacity falls off with distance: nearest = base_opac, farther = less.
     auto compute_opacity = [&](int distance) -> float {
         return base_opac * std::pow(falloff, static_cast<float>(distance - 1));
     };
 
-    // ── Find neighbor annotations from cache ──
+    // ── Find neighbor annotations from cache (distance-bounded) ──
     struct Candidate {
         const ui::canvas::Canvas *canvas;
         int abs_distance;
@@ -185,14 +199,16 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
 
-        // Walk backward for past annotations
-        if (want_before > 0) {
-            int found = 0;
+        // Walk backward — stop when distance exceeds range_before.
+        if (range_before > 0) {
             auto it = frame_bookmark_cache_.lower_bound(current_frame);
             if (it != frame_bookmark_cache_.begin()) {
                 auto pit = it;
-                while (pit != frame_bookmark_cache_.begin() && found < want_before) {
+                while (pit != frame_bookmark_cache_.begin()) {
                     --pit;
+                    int dist = current_frame - pit->first;
+                    if (dist > range_before)
+                        break;
                     for (const auto &bm : pit->second) {
                         if (!bm || !bm->annotation_ || !bm->annotation_->user_data())
                             continue;
@@ -202,21 +218,21 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
                             continue;
                         if (current_annotations.count(canvas))
                             continue;
-                        found++;
                         candidates.push_back(
-                            {canvas, current_frame - pit->first,
-                             compute_opacity(found), prev_colour});
+                            {canvas, dist, compute_opacity(dist), prev_colour});
                         break;
                     }
                 }
             }
         }
 
-        // Walk forward for future annotations
-        if (want_after > 0) {
-            int found = 0;
+        // Walk forward — stop when distance exceeds range_after.
+        if (range_after > 0) {
             auto it = frame_bookmark_cache_.upper_bound(current_frame);
-            while (it != frame_bookmark_cache_.end() && found < want_after) {
+            while (it != frame_bookmark_cache_.end()) {
+                int dist = it->first - current_frame;
+                if (dist > range_after)
+                    break;
                 for (const auto &bm : it->second) {
                     if (!bm || !bm->annotation_ || !bm->annotation_->user_data())
                         continue;
@@ -226,10 +242,8 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
                         continue;
                     if (current_annotations.count(canvas))
                         continue;
-                    found++;
                     candidates.push_back(
-                        {canvas, it->first - current_frame,
-                         compute_opacity(found), next_colour});
+                        {canvas, dist, compute_opacity(dist), next_colour});
                     break;
                 }
                 ++it;
@@ -247,7 +261,7 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
     std::vector<ui::canvas::Canvas> canvases;
     canvases.reserve(candidates.size());
     for (const auto &c : candidates) {
-        canvases.push_back(make_tinted_canvas(*c.canvas, c.opacity, c.tint));
+        canvases.push_back(make_canvas_copy(*c.canvas, c.opacity, c.tint, orig_colours));
     }
 
     return std::make_shared<OnionSkinRenderData>(std::move(canvases));

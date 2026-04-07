@@ -41,6 +41,7 @@ namespace ui {
             module::IntegerAttribute *frames_after_;
             module::FloatAttribute *base_opacity_;
             module::FloatAttribute *opacity_falloff_;
+            module::BooleanAttribute *use_original_colours_;
             module::ColourAttribute *past_tint_;
             module::ColourAttribute *future_tint_;
 
