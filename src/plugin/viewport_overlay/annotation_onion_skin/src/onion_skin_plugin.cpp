@@ -92,15 +92,15 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
     if (want_before == 0 && want_after == 0)
         return {};
 
-    // ── Derive onion skins directly from the current frame's bookmarks ──
-    // image.bookmarks() carries all bookmarks whose time range covers the
-    // current frame. Each bookmark has a start_frame_ indicating when its
-    // annotation was created. We use start_frame_ distance to classify
-    // bookmarks as "past" or "future" onion skins.
+    // ── Use all_bookmarks to find annotations on other frames ──
+    // image.all_bookmarks() carries ALL bookmarks for the current media
+    // (set by SubPlayhead), not just those covering the current frame.
+    // Each bookmark has start_frame_ — we use distance from current_frame
+    // to classify as past/future onion skins.
     //
-    // This is stateless — no cache, so bookmark deletion / media changes
-    // are handled automatically.
-    const auto &bookmarks = image.bookmarks();
+    // Fully stateless: bookmark deletion and media changes are reflected
+    // immediately since SubPlayhead rebuilds this list on every event.
+    const auto &bookmarks = image.all_bookmarks();
     if (bookmarks.empty())
         return {};
 
