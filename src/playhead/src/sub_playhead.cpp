@@ -2477,7 +2477,6 @@ void SubPlayhead::add_annotations_data_to_frame(ImageBufPtr &frame) {
         // logical_frame we can leave the loop
     }
     frame.set_bookmarks(bookmarks);
-    frame.set_all_bookmarks(bookmarks_);
 }
 
 void SubPlayhead::bookmark_deleted(const utility::Uuid &bookmark_uuid) {

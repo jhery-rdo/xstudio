@@ -92,18 +92,52 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
     if (want_before == 0 && want_after == 0)
         return {};
 
-    // ── Use all_bookmarks to find annotations on other frames ──
-    // image.all_bookmarks() carries ALL bookmarks for the current media
-    // (set by SubPlayhead), not just those covering the current frame.
-    // Each bookmark has start_frame_ — we use distance from current_frame
-    // to classify as past/future onion skins.
+    // ── Update bookmark cache ──
+    // image.bookmarks() carries bookmarks covering the current frame.
+    // We cache them keyed by logical frame to find neighbors later.
     //
-    // Fully stateless: bookmark deletion and media changes are reflected
-    // immediately since SubPlayhead rebuilds this list on every event.
-    const auto &bookmarks = image.all_bookmarks();
-    if (bookmarks.empty())
-        return {};
+    // Invalidation: when revisiting a frame, if its bookmarks changed
+    // (different UUIDs or count), we clear the entire cache. This handles
+    // bookmark deletion, media changes, and bookmark additions.
+    const auto &frame_bookmarks = image.bookmarks();
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
 
+        auto it = frame_bookmark_cache_.find(current_frame);
+        if (it != frame_bookmark_cache_.end()) {
+            // Compare cached bookmarks with current — detect changes.
+            bool changed = (it->second.size() != frame_bookmarks.size());
+            if (!changed) {
+                for (size_t i = 0; i < it->second.size(); ++i) {
+                    if (it->second[i]->detail_.uuid_ !=
+                        frame_bookmarks[i]->detail_.uuid_) {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            if (changed) {
+                frame_bookmark_cache_.clear();
+            }
+        }
+
+        // Update cache for current frame.
+        if (!frame_bookmarks.empty()) {
+            frame_bookmark_cache_[current_frame] = frame_bookmarks;
+        } else {
+            frame_bookmark_cache_.erase(current_frame);
+        }
+    }
+
+    // Collect current frame's annotation pointers — skip these when
+    // walking neighbors (same annotation spans multiple frames).
+    std::set<const void *> current_annotations;
+    for (const auto &bm : frame_bookmarks) {
+        if (bm && bm->annotation_ && bm->annotation_->user_data())
+            current_annotations.insert(bm->annotation_->user_data());
+    }
+
+    // ── Helpers ──
     auto tint_colour = [](const utility::ColourTriplet &c,
                           const utility::ColourTriplet &tint) -> utility::ColourTriplet {
         return {c.r * tint.r, c.g * tint.g, c.b * tint.b};
@@ -135,73 +169,85 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
         return out;
     };
 
-    // Collect all annotations with their start_frame distance from current.
-    // Skip bookmarks whose start_frame equals current_frame (they are the
-    // "current" annotation being rendered normally by the annotation tool).
+    auto compute_opacity = [&](int distance) -> float {
+        return base_opac * std::pow(falloff, static_cast<float>(distance - 1));
+    };
+
+    // ── Find neighbor annotations from cache ──
     struct Candidate {
         const ui::canvas::Canvas *canvas;
-        int distance;  // signed: negative = past, positive = future
-    };
-    std::vector<Candidate> past, future;
-
-    for (const auto &bm : bookmarks) {
-        if (!bm || !bm->annotation_ || !bm->annotation_->user_data())
-            continue;
-        const auto *canvas = static_cast<const ui::canvas::Canvas *>(
-            bm->annotation_->user_data());
-        if (!canvas || canvas->empty())
-            continue;
-
-        int dist = bm->start_frame_ - current_frame;
-        if (dist == 0)
-            continue;  // current frame's own annotation
-
-        if (dist < 0) {
-            past.push_back({canvas, -dist});
-        } else {
-            future.push_back({canvas, dist});
-        }
-    }
-
-    // Sort by distance (closest first) and keep only want_before / want_after.
-    std::sort(past.begin(), past.end(),
-              [](const auto &a, const auto &b) { return a.distance < b.distance; });
-    std::sort(future.begin(), future.end(),
-              [](const auto &a, const auto &b) { return a.distance < b.distance; });
-    if (static_cast<int>(past.size()) > want_before)
-        past.resize(want_before);
-    if (static_cast<int>(future.size()) > want_after)
-        future.resize(want_after);
-
-    if (past.empty() && future.empty())
-        return {};
-
-    auto compute_opacity = [&](int rank) -> float {
-        return base_opac * std::pow(falloff, static_cast<float>(rank));
-    };
-
-    // Build tinted canvases — render farthest first so closest draws on top.
-    struct RenderEntry {
-        const ui::canvas::Canvas *canvas;
-        int rank;           // 0 = closest
+        int abs_distance;
         float opacity;
         utility::ColourTriplet tint;
     };
-    std::vector<RenderEntry> entries;
+    std::vector<Candidate> candidates;
 
-    for (int i = 0; i < static_cast<int>(past.size()); ++i)
-        entries.push_back({past[i].canvas, i, compute_opacity(i), prev_colour});
-    for (int i = 0; i < static_cast<int>(future.size()); ++i)
-        entries.push_back({future[i].canvas, i, compute_opacity(i), next_colour});
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
 
-    // Sort farthest first so closest onion skin draws on top.
-    std::sort(entries.begin(), entries.end(),
-              [](const auto &a, const auto &b) { return a.rank > b.rank; });
+        // Walk backward for past annotations
+        if (want_before > 0) {
+            int found = 0;
+            auto it = frame_bookmark_cache_.lower_bound(current_frame);
+            if (it != frame_bookmark_cache_.begin()) {
+                auto pit = it;
+                while (pit != frame_bookmark_cache_.begin() && found < want_before) {
+                    --pit;
+                    for (const auto &bm : pit->second) {
+                        if (!bm || !bm->annotation_ || !bm->annotation_->user_data())
+                            continue;
+                        const auto *canvas = static_cast<const ui::canvas::Canvas *>(
+                            bm->annotation_->user_data());
+                        if (!canvas || canvas->empty())
+                            continue;
+                        if (current_annotations.count(canvas))
+                            continue;
+                        found++;
+                        candidates.push_back(
+                            {canvas, current_frame - pit->first,
+                             compute_opacity(found), prev_colour});
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Walk forward for future annotations
+        if (want_after > 0) {
+            int found = 0;
+            auto it = frame_bookmark_cache_.upper_bound(current_frame);
+            while (it != frame_bookmark_cache_.end() && found < want_after) {
+                for (const auto &bm : it->second) {
+                    if (!bm || !bm->annotation_ || !bm->annotation_->user_data())
+                        continue;
+                    const auto *canvas = static_cast<const ui::canvas::Canvas *>(
+                        bm->annotation_->user_data());
+                    if (!canvas || canvas->empty())
+                        continue;
+                    if (current_annotations.count(canvas))
+                        continue;
+                    found++;
+                    candidates.push_back(
+                        {canvas, it->first - current_frame,
+                         compute_opacity(found), next_colour});
+                    break;
+                }
+                ++it;
+            }
+        }
+    }
+
+    if (candidates.empty())
+        return {};
+
+    // Render farthest first so closest onion skin draws on top.
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto &a, const auto &b) { return a.abs_distance > b.abs_distance; });
 
     std::vector<ui::canvas::Canvas> canvases;
-    canvases.reserve(entries.size());
-    for (const auto &e : entries) {
-        canvases.push_back(make_tinted_canvas(*e.canvas, e.opacity, e.tint));
+    canvases.reserve(candidates.size());
+    for (const auto &c : candidates) {
+        canvases.push_back(make_tinted_canvas(*c.canvas, c.opacity, c.tint));
     }
 
     return std::make_shared<OnionSkinRenderData>(std::move(canvases));
