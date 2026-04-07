@@ -107,8 +107,34 @@ void OnionSkinRenderer::render_image_overlay(
 
     init_gl();
 
-    // Determine viewport dimensions for the FBO.
-    // We use the current GL viewport size.
+    // ── Save GL state that we (and the canvas renderer) will modify ──
+    GLfloat prev_clear_color[4];
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, prev_clear_color);
+
+    GLboolean prev_blend    = glIsEnabled(GL_BLEND);
+    GLboolean prev_depth    = glIsEnabled(GL_DEPTH_TEST);
+    GLboolean prev_scissor  = glIsEnabled(GL_SCISSOR_TEST);
+    GLint prev_blend_src, prev_blend_dst, prev_blend_src_a, prev_blend_dst_a;
+    glGetIntegerv(GL_BLEND_SRC_RGB, &prev_blend_src);
+    glGetIntegerv(GL_BLEND_DST_RGB, &prev_blend_dst);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &prev_blend_src_a);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &prev_blend_dst_a);
+    GLint prev_blend_eq_rgb, prev_blend_eq_a;
+    glGetIntegerv(GL_BLEND_EQUATION_RGB, &prev_blend_eq_rgb);
+    glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &prev_blend_eq_a);
+
+    GLint prev_active_tex;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active_tex);
+    GLint prev_tex_2d;
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex_2d);
+
+    GLint prev_program;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prev_program);
+    GLint prev_vao;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prev_vao);
+
+    // ── Determine FBO dimensions from current GL viewport ──
     GLint vp[4];
     glGetIntegerv(GL_VIEWPORT, vp);
     const Imath::V2f fbo_dims(
@@ -117,10 +143,9 @@ void OnionSkinRenderer::render_image_overlay(
 
     offscreen_fbo_->resize(fbo_dims);
 
-    // Compute image aspect ratio for the canvas renderer
     const float img_aspect = media_reader::image_aspect(frame);
 
-    // Render each neighboring annotation: farthest first, nearest last
+    // ── Render each neighboring annotation: farthest first, nearest last ──
     for (const auto &neighbor : render_data->neighbors) {
 
         // 1. Render the canvas into the offscreen FBO
@@ -142,11 +167,12 @@ void OnionSkinRenderer::render_image_overlay(
         // 2. Composite the FBO texture onto the viewport with opacity and tint
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glBlendEquation(GL_FUNC_ADD);
         glDisable(GL_DEPTH_TEST);
+        glDisable(GL_SCISSOR_TEST);
 
         composite_shader_->use();
 
-        // Set uniforms directly via GL calls for simplicity
         GLint loc_opacity = glGetUniformLocation(composite_shader_->program_, "opacity");
         GLint loc_tint    = glGetUniformLocation(composite_shader_->program_, "tint_colour");
         GLint loc_tex     = glGetUniformLocation(composite_shader_->program_, "fbo_texture");
@@ -165,4 +191,23 @@ void OnionSkinRenderer::render_image_overlay(
         glBindTexture(offscreen_fbo_->texture_target(), 0);
         composite_shader_->stop_using();
     }
+
+    // ── Restore all GL state ──
+    glClearColor(prev_clear_color[0], prev_clear_color[1],
+                 prev_clear_color[2], prev_clear_color[3]);
+
+    if (prev_blend)   glEnable(GL_BLEND);   else glDisable(GL_BLEND);
+    if (prev_depth)   glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (prev_scissor) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+
+    glBlendFuncSeparate(prev_blend_src, prev_blend_dst,
+                        prev_blend_src_a, prev_blend_dst_a);
+    glBlendEquationSeparate(prev_blend_eq_rgb, prev_blend_eq_a);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, prev_tex_2d);
+    glActiveTexture(prev_active_tex);
+
+    glUseProgram(prev_program);
+    glBindVertexArray(prev_vao);
 }
