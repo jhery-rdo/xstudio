@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-#include <map>
-#include <mutex>
-
 #include "xstudio/bookmark/bookmark.hpp"
 #include "xstudio/plugin_manager/hud_plugin.hpp"
 #include "xstudio/ui/canvas/canvas.hpp"
@@ -43,11 +40,6 @@ namespace ui {
             module::ColourAttribute *past_tint_;
             module::ColourAttribute *future_tint_;
 
-            // Cache of bookmarks indexed by logical frame, built from
-            // frame.bookmarks() as the user scrubs. Avoids any core changes.
-            mutable std::mutex cache_mutex_;
-            mutable std::map<int, bookmark::BookmarkAndAnnotations> frame_bookmark_cache_;
-            mutable utility::Uuid cached_media_uuid_;
         };
 
     } // namespace viewport
