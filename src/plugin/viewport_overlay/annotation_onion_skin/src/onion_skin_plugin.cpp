@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include <variant>
 
 using namespace xstudio;
@@ -95,11 +96,21 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
     // ── Update bookmark cache with current frame's bookmarks ──
     // Each frame carries its own bookmarks (set by SubPlayhead). We store
     // them keyed by logical frame so we can look up neighbors later.
+    const auto &frame_bookmarks = image.bookmarks();
     {
-        const auto &frame_bookmarks = image.bookmarks();
         if (!frame_bookmarks.empty()) {
             std::lock_guard<std::mutex> lock(cache_mutex_);
             frame_bookmark_cache_[current_frame] = frame_bookmarks;
+        }
+    }
+
+    // Collect annotation pointers on the current frame so we can skip
+    // neighbor entries that carry the same annotation (bookmarks span a
+    // range, so consecutive frames often share the same annotation).
+    std::set<const void *> current_annotations;
+    for (const auto &bm : frame_bookmarks) {
+        if (bm && bm->annotation_ && bm->annotation_->user_data()) {
+            current_annotations.insert(bm->annotation_->user_data());
         }
     }
 
@@ -165,6 +176,9 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
                             bm->annotation_->user_data());
                         if (!canvas || canvas->empty())
                             continue;
+                        // Skip if this annotation is already on the current frame
+                        if (current_annotations.count(canvas))
+                            continue;
                         found++;
                         candidates.push_back(
                             {canvas, current_frame - pit->first,
@@ -186,6 +200,9 @@ utility::BlindDataObjectPtr OnionSkinPlugin::onscreen_render_data(
                     const auto *canvas = static_cast<const ui::canvas::Canvas *>(
                         bm->annotation_->user_data());
                     if (!canvas || canvas->empty())
+                        continue;
+                    // Skip if this annotation is already on the current frame
+                    if (current_annotations.count(canvas))
                         continue;
                     found++;
                     candidates.push_back(
