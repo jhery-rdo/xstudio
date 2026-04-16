@@ -37,6 +37,12 @@ target_link_libraries(${PROJECT_NAME}
 
 set_python_to_proper_build_type()
 
+if(APPLE)
+	enable_language(OBJCXX)
+	target_sources(${PROJECT_NAME} PRIVATE macos_sleep_observer.mm)
+	target_link_libraries(${PROJECT_NAME} PRIVATE "-framework IOKit" "-framework CoreFoundation")
+endif()
+
 set_target_properties(${PROJECT_NAME} PROPERTIES LINK_DEPENDS_NO_SHARED true)
 
 if(WIN32)
