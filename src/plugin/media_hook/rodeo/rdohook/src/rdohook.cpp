@@ -184,17 +184,21 @@ class RodeoMediaHook : public MediaHook {
     module::StringAttribute *rez_ocio_config_root_;
     module::StringAttribute *default_show_;
 
+    // Static caches shared across all plugin instances (each media source
+    // gets its own MediaHookActor, so per-instance caches would be empty
+    // on every load, defeating the purpose)
+
     // Cache OCIO configs per config file path (avoids re-parsing on every media load)
-    std::unordered_map<std::string, OCIO::ConstConfigRcPtr> ocio_config_cache_;
+    static inline std::unordered_map<std::string, OCIO::ConstConfigRcPtr> ocio_config_cache_;
 
     // Cache resolved OCIO config paths per show (avoids NFS stat on every media load)
-    std::unordered_map<std::string, std::string> ocio_config_path_cache_;
+    static inline std::unordered_map<std::string, std::string> ocio_config_path_cache_;
 
     // macOS mount prefix: "/rdo" for NFS, "/Volumes" for Samba
     std::string shows_mount_prefix_{"/rdo"};
 
     // Cache for macOS-fixed OCIO config paths (original -> fixed temp path)
-    std::unordered_map<std::string, std::string> fixed_config_cache_;
+    static inline std::unordered_map<std::string, std::string> fixed_config_cache_;
 
     // File extension sets for media type detection
     static inline const std::set<std::string> movie_ext_{".mov", ".mp4", ".mxf", ".qt"};
