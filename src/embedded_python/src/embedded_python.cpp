@@ -18,6 +18,11 @@
 #include <codecvt>
 #endif
 
+#ifdef __APPLE__
+extern void register_macos_sleep_observer();
+extern void unregister_macos_sleep_observer();
+#endif
+
 using namespace xstudio;
 using namespace xstudio::embedded_python;
 using namespace xstudio::utility;
@@ -126,6 +131,9 @@ xstudio_sessions = {}
 
 void EmbeddedPython::finalize() {
     try {
+#ifdef __APPLE__
+        unregister_macos_sleep_observer();
+#endif
         if (Py_IsInitialized() and inited_ and PyGILState_Check()) {
             py::finalize_interpreter();
             inited_ = false;
@@ -171,6 +179,10 @@ XSTUDIO.connect_remote(
 
         exec("XSTUDIO.load_python_plugins()");
 
+#ifdef __APPLE__
+        register_macos_sleep_observer();
+#endif
+
     } catch (const std::exception &err) {
         spdlog::warn("{} Failed to init API : {} ", __PRETTY_FUNCTION__, err.what());
         return false;
@@ -197,6 +209,10 @@ XSTUDIO = Connection(
         // spdlog::warn("connect 3");
         py::eval("XSTUDIO.connect_local(actor)", py::globals(), local);
         exec("XSTUDIO.load_python_plugins()");
+
+#ifdef __APPLE__
+        register_macos_sleep_observer();
+#endif
 
     } catch (const py::cast_error &err) {
         spdlog::warn("{} Failed to init API : {} ", __PRETTY_FUNCTION__, err.what());
