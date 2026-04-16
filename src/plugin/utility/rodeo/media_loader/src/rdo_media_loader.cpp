@@ -154,8 +154,25 @@ class MediaLoaderWorker : public caf::event_based_actor {
         auto frame_range = payload.value("frame_range", std::string());
         auto media_name  = payload.value("version_name", std::string("unknown"));
         auto set_viewer  = payload.value("set_viewer", false);
+        auto prefer_exr  = payload.value("prefer_exr", false);
 
-        if (!movie_path.empty()) {
+        if (prefer_exr && !frames_path.empty()) {
+            // User prefers EXR: load EXR as primary, MOV as secondary.
+            spdlog::info("RdoMediaLoader: loading EXR as primary for {} (prefer_exr)", media_name);
+            mail(media::add_media_source_atom_v, frames_path, frame_range, rate)
+                .request(caf::actor_cast<caf::actor>(this), caf::infinite)
+                .then(
+                    [=, this](const UuidActor &exr_ua) mutable {
+                        if (exr_ua.uuid().is_null()) {
+                            spdlog::warn("RdoMediaLoader: EXR creation failed for {}", media_name);
+                            return;
+                        }
+                        add_to_playlist(exr_ua, media_name, set_viewer, playlist, subset, payload, "", "", movie_path, rate);
+                    },
+                    [=](caf::error &err) {
+                        spdlog::warn("RdoMediaLoader: EXR primary: {}", to_string(err));
+                    });
+        } else if (!movie_path.empty()) {
             // MOV available: load MOV as primary, EXR as secondary.
             mail(media::add_media_source_atom_v, movie_path, rate, true)
                 .request(caf::actor_cast<caf::actor>(this), caf::infinite)
@@ -171,7 +188,7 @@ class MediaLoaderWorker : public caf::event_based_actor {
                             }
                             return;
                         }
-                        add_to_playlist(mov_ua, media_name, set_viewer, playlist, subset, payload, frames_path, frame_range, rate);
+                        add_to_playlist(mov_ua, media_name, set_viewer, playlist, subset, payload, frames_path, frame_range, "", rate);
                     },
                     [=, this](caf::error &err) mutable {
                         spdlog::warn("RdoMediaLoader: MOV step failed: {}", to_string(err));
@@ -208,7 +225,7 @@ class MediaLoaderWorker : public caf::event_based_actor {
                         return;
                     }
                     // No secondary source when EXR is primary.
-                    add_to_playlist(exr_ua, media_name, set_viewer, playlist, subset, payload, "", "", rate);
+                    add_to_playlist(exr_ua, media_name, set_viewer, playlist, subset, payload, "", "", "", rate);
                 },
                 [=](caf::error &err) {
                     spdlog::warn("RdoMediaLoader: EXR primary: {}", to_string(err));
@@ -217,7 +234,7 @@ class MediaLoaderWorker : public caf::event_based_actor {
 
     // Common path: given a primary source, create the media actor,
     // add to playlist/subset, set metadata, set viewer, and optionally
-    // add a secondary EXR source.
+    // add a secondary source (EXR frames or MOV).
     void add_to_playlist(
         const UuidActor &primary_ua,
         const std::string &media_name,
@@ -227,6 +244,7 @@ class MediaLoaderWorker : public caf::event_based_actor {
         const JsonStore &payload,
         const std::string &secondary_frames_path,
         const std::string &secondary_frame_range,
+        const std::string &secondary_movie_path,
         const FrameRate &rate) {
 
         auto media_uuid  = Uuid::generate();
@@ -269,7 +287,7 @@ class MediaLoaderWorker : public caf::event_based_actor {
                                 }
                                 spdlog::info("RdoMediaLoader: loaded {} (primary source)", media_name);
 
-                                // Add secondary EXR source in background.
+                                // Add secondary source in background.
                                 if (!secondary_frames_path.empty()) {
                                     mail(media::add_media_source_atom_v, secondary_frames_path, secondary_frame_range, rate)
                                         .request(caf::actor_cast<caf::actor>(this), caf::infinite)
@@ -285,6 +303,22 @@ class MediaLoaderWorker : public caf::event_based_actor {
                                             },
                                             [=](caf::error &err) {
                                                 spdlog::warn("RdoMediaLoader: EXR secondary: {}", to_string(err));
+                                            });
+                                } else if (!secondary_movie_path.empty()) {
+                                    mail(media::add_media_source_atom_v, secondary_movie_path, rate, true)
+                                        .request(caf::actor_cast<caf::actor>(this), caf::infinite)
+                                        .then(
+                                            [=](const UuidActor &mov_ua) mutable {
+                                                if (!mov_ua.uuid().is_null()) {
+                                                    UuidActorVector mov_vec;
+                                                    mov_vec.push_back(mov_ua);
+                                                    anon_mail(media::add_media_source_atom_v, mov_vec)
+                                                        .send(media_actor);
+                                                    spdlog::info("RdoMediaLoader: MOV added for {}", media_name);
+                                                }
+                                            },
+                                            [=](caf::error &err) {
+                                                spdlog::warn("RdoMediaLoader: MOV secondary: {}", to_string(err));
                                             });
                                 }
                             },
