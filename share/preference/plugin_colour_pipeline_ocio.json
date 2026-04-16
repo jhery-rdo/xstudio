@@ -4,9 +4,9 @@
 			"ocio": {
 				"global_view_mode": {
 					"path": "/plugin/colour_pipeline/ocio/global_view_mode",
-					"default_value": true,
+					"default_value": false,
 					"description": "Apply OCIO view selection to all media.",
-					"value": true,
+					"value": false,
 					"datatype": "bool",
 					"context": ["APPLICATION"]
 				},
@@ -15,14 +15,6 @@
 					"default_value": true,
 					"description": "Avoid LUT inversion for external media.",
 					"value": true,
-					"datatype": "bool",
-					"context": ["APPLICATION"]
-				},
-				"apply_saturation_after_lut": {
-					"path": "/plugin/colour_pipeline/ocio/apply_saturation_after_lut",
-					"default_value": false,
-					"description": "Apply viewport saturation after OCIO display view.",
-					"value": false,
 					"datatype": "bool",
 					"context": ["APPLICATION"]
 				},

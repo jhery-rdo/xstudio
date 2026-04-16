@@ -1,0 +1,36 @@
+{
+	"plugin": {
+		"rodeo_media_hook": {
+			"auto_trim_slate": {
+				"path": "/plugin/rodeo_media_hook/auto_trim_slate",
+				"default_value": true,
+				"description": "Automatically trim first frame from MOVs in /movhistory or .published folders",
+				"value": true,
+				"datatype": "bool",
+				"context": ["APPLICATION"],
+				"category": "RodeoFX",
+				"display_name": "Auto Trim Slate"
+			},
+			"rez_ocio_config_root": {
+				"path": "/plugin/rodeo_media_hook/rez_ocio_config_root",
+				"default_value": "/rdo/software/rez/packages/rdo_ocio_config/2.5.0",
+				"description": "Path to the REZ OCIO config package containing LUTs and transforms",
+				"value": "/rdo/software/rez/packages/rdo_ocio_config/2.5.0",
+				"datatype": "string",
+				"context": ["APPLICATION"],
+				"category": "RodeoFX",
+				"display_name": "REZ OCIO Config Root"
+			},
+			"default_show": {
+				"path": "/plugin/rodeo_media_hook/default_show",
+				"default_value": "cdl",
+				"description": "Default show code to use when the show cannot be determined from the media path",
+				"value": "cdl",
+				"datatype": "string",
+				"context": ["APPLICATION"],
+				"category": "RodeoFX",
+				"display_name": "Default Show Code"
+			}
+		}
+	}
+}
