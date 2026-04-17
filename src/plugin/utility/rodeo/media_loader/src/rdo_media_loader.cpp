@@ -11,12 +11,30 @@
 //   connection.send(loader.remote, playlist::add_media_atom(),
 //       JsonStore(payload), playlist_actor, subset_actor, FrameRate(24.0))
 
+// cpp-httplib feature flags must be set before httplib.h is included (directly
+// or transitively by any other header) so the SSL-capable Client constructor
+// is compiled in.  Without this, https:// URLs raise
+// "'https' scheme is not supported" at runtime.
+#ifndef CPPHTTPLIB_OPENSSL_SUPPORT
+#define CPPHTTPLIB_OPENSSL_SUPPORT
+#endif
+#ifndef CPPHTTPLIB_ZLIB_SUPPORT
+#define CPPHTTPLIB_ZLIB_SUPPORT
+#endif
+
 #include <caf/all.hpp>
 #include <caf/actor_registry.hpp>
+#include <filesystem>
+#include <fstream>
 #include <regex>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 #include <spdlog/spdlog.h>
 
 #include "xstudio/atoms.hpp"
+#include "xstudio/http_client/http_client.hpp"
 #include "xstudio/media/media_actor.hpp"
 #include "xstudio/plugin_manager/plugin_base.hpp"
 #include "xstudio/plugin_manager/plugin_manager.hpp"
@@ -31,8 +49,157 @@ namespace {
 
 const auto RdoMediaLoaderRegistry = std::string("RDO_MEDIA_LOADER");
 
+// Source identifiers (user-visible names shown on Media sources in xStudio).
+const auto SourceMov    = std::string("MOV");
+const auto SourceFrames = std::string("Frames");
+const auto SourceWeb    = std::string("Web");
+
+// ---------------------------------------------------------------------------
+// Web (http/https) download support
+// ---------------------------------------------------------------------------
+// xStudio's media reader only speaks filesystem paths.  The ShotGrid
+// sg_uploaded_movie_mp4 field returns a short-lived S3 signed URL; before we
+// can hand it to MediaSourceActor we need to materialise it on disk.  The
+// download is a straight HTTP(S) GET via cpp-httplib (already pulled in as a
+// dep of xstudio::http_client).  Files land in a per-session cache dir that
+// is wiped at plugin startup.
+
+std::string web_cache_dir() {
+    return (std::filesystem::temp_directory_path() / "xstudio_rdo_media_loader").string();
+}
+
+bool is_http_url(const std::string &path) {
+    return path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0;
+}
+
+void cleanup_web_cache() {
+    try {
+        auto dir = web_cache_dir();
+        if (std::filesystem::exists(dir)) {
+            std::error_code ec;
+            std::filesystem::remove_all(dir, ec);
+            if (ec) {
+                spdlog::warn(
+                    "RdoMediaLoader: web cache cleanup failed ({}): {}",
+                    dir, ec.message());
+            } else {
+                spdlog::info("RdoMediaLoader: cleared web cache at {}", dir);
+            }
+        }
+    } catch (const std::exception &e) {
+        spdlog::warn("RdoMediaLoader: cleanup exception: {}", e.what());
+    }
+}
+
+// Download a web URL to the cache dir; returns the local path on success, an
+// empty string on failure.  The target filename is derived from the last path
+// component of the URL (ShotGrid prefixes uploaded mp4s with a content hash,
+// so same-content reuse is safe across signed-URL rotations within a session).
+std::string download_web_url(const std::string &url) {
+    try {
+        auto scheme_end = url.find("://");
+        if (scheme_end == std::string::npos) return std::string();
+        auto host_start = scheme_end + 3;
+        auto path_start = url.find('/', host_start);
+        if (path_start == std::string::npos) return std::string();
+
+        std::string scheme_host     = url.substr(0, path_start);
+        std::string path_with_query = url.substr(path_start);
+
+        // Derive filename from the path part only (strip query string).
+        auto q = path_with_query.find('?');
+        std::string path_no_query =
+            (q != std::string::npos) ? path_with_query.substr(0, q) : path_with_query;
+        auto last_slash = path_no_query.rfind('/');
+        std::string filename =
+            (last_slash != std::string::npos && last_slash + 1 < path_no_query.size())
+                ? path_no_query.substr(last_slash + 1)
+                : std::string("web.mp4");
+        if (filename.empty()) filename = "web.mp4";
+
+        auto cache_dir = web_cache_dir();
+        std::error_code ec;
+        std::filesystem::create_directories(cache_dir, ec);
+        if (ec) {
+            spdlog::warn(
+                "RdoMediaLoader: cannot create cache dir {}: {}",
+                cache_dir, ec.message());
+            return std::string();
+        }
+
+        auto local_path = (std::filesystem::path(cache_dir) / filename).string();
+
+        // Reuse an already-downloaded file when the filename matches.  ShotGrid
+        // uploaded mp4s are named by a content hash so the same filename implies
+        // the same bytes; the signed URL query string rotates but we key purely
+        // off the path portion.
+        if (std::filesystem::exists(local_path) &&
+            std::filesystem::file_size(local_path) > 0) {
+            spdlog::info(
+                "RdoMediaLoader: reusing cached web file {}", local_path);
+            return local_path;
+        }
+
+        spdlog::info(
+            "RdoMediaLoader: downloading web file -> {}", local_path);
+
+        httplib::Client cli(scheme_host);
+        cli.set_follow_location(true);
+        cli.set_connection_timeout(10, 0);
+        cli.set_read_timeout(60, 0);
+
+        std::ofstream out(local_path, std::ios::binary);
+        if (!out) {
+            spdlog::warn(
+                "RdoMediaLoader: cannot open {} for write", local_path);
+            return std::string();
+        }
+
+        // Stream directly to disk so we don't buffer a multi-MB body in memory.
+        auto res = cli.Get(
+            path_with_query.c_str(),
+            [&out](const char *data, size_t len) {
+                out.write(data, static_cast<std::streamsize>(len));
+                return static_cast<bool>(out);
+            });
+        out.close();
+
+        if (!res) {
+            spdlog::warn(
+                "RdoMediaLoader: download error: {}",
+                httplib::to_string(res.error()));
+            std::filesystem::remove(local_path, ec);
+            return std::string();
+        }
+        if (res->status != 200) {
+            spdlog::warn(
+                "RdoMediaLoader: download http status={} for {}",
+                res->status, filename);
+            std::filesystem::remove(local_path, ec);
+            return std::string();
+        }
+
+        auto sz = std::filesystem::file_size(local_path, ec);
+        spdlog::info(
+            "RdoMediaLoader: downloaded {} ({} bytes)",
+            filename, ec ? 0 : static_cast<long long>(sz));
+        return local_path;
+
+    } catch (const std::exception &e) {
+        spdlog::warn("RdoMediaLoader: download exception: {}", e.what());
+        return std::string();
+    }
+}
+
+// Small holder for a resolved representation during loading.
+struct Representation {
+    std::string kind;          // SourceMov / SourceFrames / SourceWeb
+    std::string path;
+    std::string frame_range;   // only meaningful for Frames
+};
+
 // Worker actor — follows DNEG's promise-chaining pattern.
-// Step 1: create MOV source → Step 2: create EXR source → Step 3: assemble media.
+// Step 1: create primary source → Step 2: assemble media → Step 3: add secondaries.
 class MediaLoaderWorker : public caf::event_based_actor {
   public:
     MediaLoaderWorker(caf::actor_config &cfg)
@@ -57,8 +224,9 @@ class MediaLoaderWorker : public caf::event_based_actor {
                 }
             },
 
-            // MOV source creation handler (called by do_load via self-request).
+            // Movie source creation handler (used by MOV and Web).
             [=](media::add_media_source_atom,
+                const std::string &source_name,
                 const std::string &path,
                 const FrameRate &rate,
                 bool /*is_movie*/) -> caf::result<UuidActor> {
@@ -71,7 +239,7 @@ class MediaLoaderWorker : public caf::event_based_actor {
                     auto uri         = posix_path_to_uri(path);
                     auto source_uuid = Uuid::generate();
                     auto source =
-                        spawn<media::MediaSourceActor>("MOV", uri, rate, source_uuid);
+                        spawn<media::MediaSourceActor>(source_name, uri, rate, source_uuid);
                     mail(media::acquire_media_detail_atom_v, rate)
                         .request(source, std::chrono::seconds(30))
                         .then(
@@ -79,18 +247,21 @@ class MediaLoaderWorker : public caf::event_based_actor {
                                 rp.deliver(UuidActor(source_uuid, source));
                             },
                             [=](caf::error &err) mutable {
-                                spdlog::warn("RdoMediaLoader: MOV detail: {}", to_string(err));
+                                spdlog::warn(
+                                    "RdoMediaLoader: {} detail: {}",
+                                    source_name, to_string(err));
                                 rp.deliver(UuidActor(source_uuid, source));
                             });
                 } catch (const std::exception &e) {
-                    spdlog::warn("RdoMediaLoader: MOV: {}", e.what());
+                    spdlog::warn("RdoMediaLoader: {}: {}", source_name, e.what());
                     rp.deliver(UuidActor());
                 }
                 return rp;
             },
 
-            // EXR/frames source creation handler.
+            // Frames (image sequence) source creation handler.
             [=](media::add_media_source_atom,
+                const std::string &source_name,
                 const std::string &path,
                 const std::string &frame_range,
                 const FrameRate &rate) -> caf::result<UuidActor> {
@@ -119,9 +290,9 @@ class MediaLoaderWorker : public caf::event_based_actor {
                     auto source =
                         frame_list.empty()
                             ? spawn<media::MediaSourceActor>(
-                                  "EXR", uri, rate, source_uuid)
+                                  source_name, uri, rate, source_uuid)
                             : spawn<media::MediaSourceActor>(
-                                  "EXR", uri, frame_list, rate, source_uuid);
+                                  source_name, uri, frame_list, rate, source_uuid);
 
                     mail(media::acquire_media_detail_atom_v, rate)
                         .request(source, std::chrono::seconds(30))
@@ -130,11 +301,13 @@ class MediaLoaderWorker : public caf::event_based_actor {
                                 rp.deliver(UuidActor(source_uuid, source));
                             },
                             [=](caf::error &err) mutable {
-                                spdlog::warn("RdoMediaLoader: EXR detail: {}", to_string(err));
+                                spdlog::warn(
+                                    "RdoMediaLoader: {} detail: {}",
+                                    source_name, to_string(err));
                                 rp.deliver(UuidActor(source_uuid, source));
                             });
                 } catch (const std::exception &e) {
-                    spdlog::warn("RdoMediaLoader: EXR: {}", e.what());
+                    spdlog::warn("RdoMediaLoader: {}: {}", source_name, e.what());
                     rp.deliver(UuidActor());
                 }
                 return rp;
@@ -151,90 +324,153 @@ class MediaLoaderWorker : public caf::event_based_actor {
 
         auto movie_path  = payload.value("movie_path", std::string());
         auto frames_path = payload.value("frames_path", std::string());
+        auto web_path    = payload.value("web_path", std::string());
         auto frame_range = payload.value("frame_range", std::string());
         auto media_name  = payload.value("version_name", std::string("unknown"));
         auto set_viewer  = payload.value("set_viewer", false);
-        auto prefer_exr  = payload.value("prefer_exr", false);
+        auto preference  = payload.value("media_preference", std::string(SourceMov));
 
-        if (prefer_exr && !frames_path.empty()) {
-            // User prefers EXR: load EXR as primary, MOV as secondary.
-            spdlog::info("RdoMediaLoader: loading EXR as primary for {} (prefer_exr)", media_name);
-            mail(media::add_media_source_atom_v, frames_path, frame_range, rate)
-                .request(caf::actor_cast<caf::actor>(this), caf::infinite)
-                .then(
-                    [=, this](const UuidActor &exr_ua) mutable {
-                        if (exr_ua.uuid().is_null()) {
-                            spdlog::warn("RdoMediaLoader: EXR creation failed for {}", media_name);
-                            return;
-                        }
-                        add_to_playlist(exr_ua, media_name, set_viewer, playlist, subset, payload, "", "", movie_path, rate);
-                    },
-                    [=](caf::error &err) {
-                        spdlog::warn("RdoMediaLoader: EXR primary: {}", to_string(err));
-                    });
-        } else if (!movie_path.empty()) {
-            // MOV available: load MOV as primary, EXR as secondary.
-            mail(media::add_media_source_atom_v, movie_path, rate, true)
-                .request(caf::actor_cast<caf::actor>(this), caf::infinite)
-                .then(
-                    [=, this](const UuidActor &mov_ua) mutable {
-                        if (mov_ua.uuid().is_null()) {
-                            // MOV creation failed — fall back to EXR-only.
-                            if (!frames_path.empty()) {
-                                spdlog::info("RdoMediaLoader: MOV failed, falling back to EXR for {}", media_name);
-                                load_exr_primary(frames_path, frame_range, media_name, set_viewer, playlist, subset, payload, rate);
-                            } else {
-                                spdlog::warn("RdoMediaLoader: no sources for {}", media_name);
-                            }
-                            return;
-                        }
-                        add_to_playlist(mov_ua, media_name, set_viewer, playlist, subset, payload, frames_path, frame_range, "", rate);
-                    },
-                    [=, this](caf::error &err) mutable {
-                        spdlog::warn("RdoMediaLoader: MOV step failed: {}", to_string(err));
-                        if (!frames_path.empty()) {
-                            load_exr_primary(frames_path, frame_range, media_name, set_viewer, playlist, subset, payload, rate);
-                        }
-                    });
-        } else if (!frames_path.empty()) {
-            // No MOV: load EXR as primary source.
-            load_exr_primary(frames_path, frame_range, media_name, set_viewer, playlist, subset, payload, rate);
-        } else {
+        // If the Web representation is a remote URL, download it to the
+        // session-local cache first.  xStudio's media reader cannot consume
+        // http(s) URIs — it would hang the viewport waiting for frames.
+        // Failure returns an empty path, which causes build_load_order() to
+        // skip Web and fall through to the next representation.
+        if (!web_path.empty() && is_http_url(web_path)) {
+            web_path = download_web_url(web_path);
+        }
+
+        // Build the ordered list of available representations:
+        // the first entry becomes the primary, the rest are added as secondaries
+        // (in order) once the primary has been attached to the media actor.
+        std::vector<Representation> order = build_load_order(
+            preference, movie_path, frames_path, web_path, frame_range);
+
+        if (order.empty()) {
             spdlog::warn("RdoMediaLoader: no sources for {}", media_name);
+            return;
+        }
+
+        const auto primary = order.front();
+        std::vector<Representation> secondaries(order.begin() + 1, order.end());
+
+        spdlog::info(
+            "RdoMediaLoader: loading {} as primary for {} (preference={})",
+            primary.kind, media_name, preference);
+
+        request_source(
+            primary, rate,
+            [=, this](const UuidActor &primary_ua) mutable {
+                if (primary_ua.uuid().is_null()) {
+                    // Primary creation failed — try the next representation
+                    // as a fallback primary (e.g. MOV fails → Frames).
+                    if (secondaries.empty()) {
+                        spdlog::warn(
+                            "RdoMediaLoader: primary ({}) failed for {}, no fallback",
+                            primary.kind, media_name);
+                        return;
+                    }
+                    spdlog::info(
+                        "RdoMediaLoader: {} failed, falling back to {} for {}",
+                        primary.kind, secondaries.front().kind, media_name);
+                    auto new_primary = secondaries.front();
+                    std::vector<Representation> new_secondaries(
+                        secondaries.begin() + 1, secondaries.end());
+                    request_source(
+                        new_primary, rate,
+                        [=, this](const UuidActor &fallback_ua) mutable {
+                            if (fallback_ua.uuid().is_null()) {
+                                spdlog::warn(
+                                    "RdoMediaLoader: all sources failed for {}",
+                                    media_name);
+                                return;
+                            }
+                            add_to_playlist(
+                                fallback_ua, media_name, set_viewer, playlist,
+                                subset, payload, new_secondaries, rate);
+                        },
+                        [=](caf::error &err) {
+                            spdlog::warn(
+                                "RdoMediaLoader: fallback primary: {}",
+                                to_string(err));
+                        });
+                    return;
+                }
+                add_to_playlist(
+                    primary_ua, media_name, set_viewer, playlist, subset,
+                    payload, secondaries, rate);
+            },
+            [=](caf::error &err) {
+                spdlog::warn(
+                    "RdoMediaLoader: primary step failed: {}", to_string(err));
+            });
+    }
+
+    // Build an ordered list of available representations, with the user-preferred
+    // one first. Missing paths are skipped.
+    std::vector<Representation> build_load_order(
+        const std::string &preference,
+        const std::string &movie_path,
+        const std::string &frames_path,
+        const std::string &web_path,
+        const std::string &frame_range) const {
+
+        // Canonical order when the preferred representation is missing.
+        // We always try MOV → Frames → Web as fallback to keep behaviour
+        // predictable (MOV is fastest to display).
+        const std::vector<std::string> fallback = {SourceMov, SourceFrames, SourceWeb};
+
+        // Start with the preferred representation, then append fallbacks that
+        // aren't the preference.
+        std::vector<std::string> kind_order;
+        kind_order.reserve(3);
+        kind_order.push_back(preference);
+        for (const auto &k : fallback) {
+            if (k != preference) kind_order.push_back(k);
+        }
+
+        std::vector<Representation> out;
+        out.reserve(3);
+        for (const auto &kind : kind_order) {
+            if (kind == SourceMov && !movie_path.empty()) {
+                out.push_back({SourceMov, movie_path, std::string()});
+            } else if (kind == SourceFrames && !frames_path.empty()) {
+                out.push_back({SourceFrames, frames_path, frame_range});
+            } else if (kind == SourceWeb && !web_path.empty()) {
+                out.push_back({SourceWeb, web_path, std::string()});
+            }
+        }
+        return out;
+    }
+
+    // Request creation of a media source for the given representation, dispatching
+    // to the movie handler (MOV/Web) or the sequence handler (Frames).
+    template <typename OnSuccess, typename OnError>
+    void request_source(
+        const Representation &rep,
+        const FrameRate &rate,
+        OnSuccess &&on_success,
+        OnError &&on_error) {
+        auto self = caf::actor_cast<caf::actor>(this);
+        if (rep.kind == SourceFrames) {
+            mail(
+                media::add_media_source_atom_v, rep.kind, rep.path,
+                rep.frame_range, rate)
+                .request(self, caf::infinite)
+                .then(
+                    std::forward<OnSuccess>(on_success),
+                    std::forward<OnError>(on_error));
+        } else {
+            mail(media::add_media_source_atom_v, rep.kind, rep.path, rate, true)
+                .request(self, caf::infinite)
+                .then(
+                    std::forward<OnSuccess>(on_success),
+                    std::forward<OnError>(on_error));
         }
     }
 
-    // Load EXR as the primary (and only) source.
-    void load_exr_primary(
-        const std::string &frames_path,
-        const std::string &frame_range,
-        const std::string &media_name,
-        bool set_viewer,
-        caf::actor playlist,
-        caf::actor subset,
-        const JsonStore &payload,
-        const FrameRate &rate) {
-
-        spdlog::info("RdoMediaLoader: loading EXR as primary for {}", media_name);
-        mail(media::add_media_source_atom_v, frames_path, frame_range, rate)
-            .request(caf::actor_cast<caf::actor>(this), caf::infinite)
-            .then(
-                [=, this](const UuidActor &exr_ua) mutable {
-                    if (exr_ua.uuid().is_null()) {
-                        spdlog::warn("RdoMediaLoader: EXR creation failed for {}", media_name);
-                        return;
-                    }
-                    // No secondary source when EXR is primary.
-                    add_to_playlist(exr_ua, media_name, set_viewer, playlist, subset, payload, "", "", "", rate);
-                },
-                [=](caf::error &err) {
-                    spdlog::warn("RdoMediaLoader: EXR primary: {}", to_string(err));
-                });
-    }
-
     // Common path: given a primary source, create the media actor,
-    // add to playlist/subset, set metadata, set viewer, and optionally
-    // add a secondary source (EXR frames or MOV).
+    // add to playlist/subset, set metadata, set viewer, and sequentially
+    // add any remaining representations as secondary sources.
     void add_to_playlist(
         const UuidActor &primary_ua,
         const std::string &media_name,
@@ -242,9 +478,7 @@ class MediaLoaderWorker : public caf::event_based_actor {
         caf::actor playlist,
         caf::actor subset,
         const JsonStore &payload,
-        const std::string &secondary_frames_path,
-        const std::string &secondary_frame_range,
-        const std::string &secondary_movie_path,
+        const std::vector<Representation> &secondaries,
         const FrameRate &rate) {
 
         auto media_uuid  = Uuid::generate();
@@ -285,45 +519,37 @@ class MediaLoaderWorker : public caf::event_based_actor {
                                         set_viewer_to_subset(subset, media_name);
                                     }
                                 }
-                                spdlog::info("RdoMediaLoader: loaded {} (primary source)", media_name);
+                                spdlog::info(
+                                    "RdoMediaLoader: loaded {} (primary source)",
+                                    media_name);
 
-                                // Add secondary source in background.
-                                if (!secondary_frames_path.empty()) {
-                                    mail(media::add_media_source_atom_v, secondary_frames_path, secondary_frame_range, rate)
-                                        .request(caf::actor_cast<caf::actor>(this), caf::infinite)
-                                        .then(
-                                            [=](const UuidActor &exr_ua) mutable {
-                                                if (!exr_ua.uuid().is_null()) {
-                                                    UuidActorVector exr_vec;
-                                                    exr_vec.push_back(exr_ua);
-                                                    anon_mail(media::add_media_source_atom_v, exr_vec)
-                                                        .send(media_actor);
-                                                    spdlog::info("RdoMediaLoader: EXR added for {}", media_name);
-                                                }
-                                            },
-                                            [=](caf::error &err) {
-                                                spdlog::warn("RdoMediaLoader: EXR secondary: {}", to_string(err));
-                                            });
-                                } else if (!secondary_movie_path.empty()) {
-                                    mail(media::add_media_source_atom_v, secondary_movie_path, rate, true)
-                                        .request(caf::actor_cast<caf::actor>(this), caf::infinite)
-                                        .then(
-                                            [=](const UuidActor &mov_ua) mutable {
-                                                if (!mov_ua.uuid().is_null()) {
-                                                    UuidActorVector mov_vec;
-                                                    mov_vec.push_back(mov_ua);
-                                                    anon_mail(media::add_media_source_atom_v, mov_vec)
-                                                        .send(media_actor);
-                                                    spdlog::info("RdoMediaLoader: MOV added for {}", media_name);
-                                                }
-                                            },
-                                            [=](caf::error &err) {
-                                                spdlog::warn("RdoMediaLoader: MOV secondary: {}", to_string(err));
-                                            });
+                                // Add secondary sources in background, in order.
+                                for (const auto &rep : secondaries) {
+                                    request_source(
+                                        rep, rate,
+                                        [=](const UuidActor &sec_ua) mutable {
+                                            if (!sec_ua.uuid().is_null()) {
+                                                UuidActorVector sec_vec;
+                                                sec_vec.push_back(sec_ua);
+                                                anon_mail(
+                                                    media::add_media_source_atom_v,
+                                                    sec_vec)
+                                                    .send(media_actor);
+                                                spdlog::info(
+                                                    "RdoMediaLoader: {} added for {}",
+                                                    rep.kind, media_name);
+                                            }
+                                        },
+                                        [=](caf::error &err) {
+                                            spdlog::warn(
+                                                "RdoMediaLoader: {} secondary: {}",
+                                                rep.kind, to_string(err));
+                                        });
                                 }
                             },
                             [=](caf::error &err) {
-                                spdlog::warn("RdoMediaLoader: playlist add: {}", to_string(err));
+                                spdlog::warn(
+                                    "RdoMediaLoader: playlist add: {}", to_string(err));
                             });
                 },
                 [=](caf::error &err) {
@@ -350,11 +576,15 @@ class MediaLoaderWorker : public caf::event_based_actor {
                                 spdlog::info("RdoMediaLoader: set viewer to subset");
                             },
                             [=](caf::error &err) {
-                                spdlog::warn("RdoMediaLoader: set_viewer UUID failed: {}", to_string(err));
+                                spdlog::warn(
+                                    "RdoMediaLoader: set_viewer UUID failed: {}",
+                                    to_string(err));
                             });
                 },
                 [=](caf::error &err) {
-                    spdlog::warn("RdoMediaLoader: set_viewer session lookup failed: {}", to_string(err));
+                    spdlog::warn(
+                        "RdoMediaLoader: set_viewer session lookup failed: {}",
+                        to_string(err));
                 });
     }
 };
@@ -370,6 +600,9 @@ class RdoMediaLoaderPlugin : public xstudio::plugin::StandardPlugin {
         system().registry().put(
             RdoMediaLoaderRegistry, caf::actor_cast<caf::actor>(this));
         spdlog::info("RdoMediaLoader: registered as {}", RdoMediaLoaderRegistry);
+
+        // Clear any leftover web downloads from a previous session.
+        cleanup_web_cache();
 
         for (int i = 0; i < 4; ++i) {
             auto w = spawn<MediaLoaderWorker>();
