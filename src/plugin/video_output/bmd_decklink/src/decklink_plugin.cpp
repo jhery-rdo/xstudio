@@ -301,13 +301,9 @@ void BMDecklinkPlugin::initialise() {
         dcl_output_ = new DecklinkOutput(this);
 
         if (!dcl_output_->is_available()) {
-            const auto decklink_error =
-                dcl_output_->last_error().empty() ? "No DeckLink device detected."
-                                                 : dcl_output_->last_error();
             delete dcl_output_;
             dcl_output_ = nullptr;
-            status_message_->set_value(
-                decklink_error);
+            status_message_->set_value("No DeckLink device detected.");
             is_in_error_->set_value(true);
             spdlog::warn("Decklink output unavailable.");
             return;
