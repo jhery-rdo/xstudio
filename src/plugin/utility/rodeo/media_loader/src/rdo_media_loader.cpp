@@ -330,13 +330,18 @@ class MediaLoaderWorker : public caf::event_based_actor {
         auto set_viewer  = payload.value("set_viewer", false);
         auto preference  = payload.value("media_preference", std::string(SourceMov));
 
-        // If the Web representation is a remote URL, download it to the
-        // session-local cache first.  xStudio's media reader cannot consume
-        // http(s) URIs — it would hang the viewport waiting for frames.
-        // Failure returns an empty path, which causes build_load_order() to
-        // skip Web and fall through to the next representation.
-        if (!web_path.empty() && is_http_url(web_path)) {
-            web_path = download_web_url(web_path);
+        // Web is only loaded when it is the explicit preference — otherwise we
+        // drop it to avoid the HTTP fetch cost on every media item. xStudio's
+        // media reader cannot consume http(s) URIs directly, so a remote Web
+        // URL is downloaded to the session-local cache here. Failure returns
+        // an empty path, which causes build_load_order() to drop Web and fall
+        // through to MOV/Frames.
+        if (preference == SourceWeb) {
+            if (!web_path.empty() && is_http_url(web_path)) {
+                web_path = download_web_url(web_path);
+            }
+        } else {
+            web_path.clear();
         }
 
         // Build the ordered list of available representations:
@@ -415,9 +420,10 @@ class MediaLoaderWorker : public caf::event_based_actor {
         const std::string &frame_range) const {
 
         // Canonical order when the preferred representation is missing.
-        // We always try MOV → Frames → Web as fallback to keep behaviour
-        // predictable (MOV is fastest to display).
-        const std::vector<std::string> fallback = {SourceMov, SourceFrames, SourceWeb};
+        // Web is intentionally excluded from the fallback chain: it is only
+        // loaded when the user explicitly prefers it, so we don't pay the
+        // HTTP download cost on every media item.
+        const std::vector<std::string> fallback = {SourceMov, SourceFrames};
 
         // Start with the preferred representation, then append fallbacks that
         // aren't the preference.
