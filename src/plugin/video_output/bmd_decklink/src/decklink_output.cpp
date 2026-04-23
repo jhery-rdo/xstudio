@@ -14,6 +14,10 @@
 #define kDeckLinkAPI_Name "libDeckLinkAPI.so"
 #endif
 
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
 using namespace xstudio::bm_decklink_plugin_1_0;
 
 // Uncomment to use this debug timer to see how the frame conversion is performing
@@ -109,11 +113,26 @@ void DecklinkOutput::detect_runtime_info() {
 #endif
 
     if (auto *api_info = CreateDeckLinkAPIInformationInstance()) {
+#ifdef __APPLE__
+        // macOS DeckLink SDK uses CoreFoundation strings rather than C strings.
+        CFStringRef api_version_cf = nullptr;
+        if (api_info->GetString(BMDDeckLinkAPIVersion, &api_version_cf) == S_OK &&
+            api_version_cf) {
+            char buf[128] = {0};
+            if (CFStringGetCString(
+                    api_version_cf, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+                api_version_ = buf;
+                details.emplace_back(fmt::format("api_version={}", buf));
+            }
+            CFRelease(api_version_cf);
+        }
+#else
         const char *api_version = nullptr;
         if (api_info->GetString(BMDDeckLinkAPIVersion, &api_version) == S_OK && api_version) {
             api_version_ = api_version;
             details.emplace_back(fmt::format("api_version={}", api_version));
         }
+#endif
         api_info->Release();
     }
 
@@ -1265,11 +1284,16 @@ HRESULT AVOutputCallback::QueryInterface(REFIID iid, LPVOID *ppv) {
 
     *ppv = NULL;
 
+#ifdef __linux__
+    // On Linux the DeckLink SDK exposes IID_IUnknown as a plain REFIID constant.
+    // macOS uses CoreFoundation CFUUID types instead and has no equivalent
+    // symbol — we just skip the IUnknown identity check there.
     const auto iid_unknown = IID_IUnknown;
-
     if (std::memcmp(&iid, &iid_unknown, sizeof(REFIID)) == 0) {
         *ppv = static_cast<IUnknown *>(static_cast<IDeckLinkVideoOutputCallback *>(this));
-    } else if (std::memcmp(&iid, &IID_IDeckLinkVideoOutputCallback, sizeof(REFIID)) == 0) {
+    } else
+#endif
+    if (std::memcmp(&iid, &IID_IDeckLinkVideoOutputCallback, sizeof(REFIID)) == 0) {
         *ppv = static_cast<IDeckLinkVideoOutputCallback *>(this);
     } else {
         return E_NOINTERFACE;
@@ -1321,11 +1345,14 @@ HRESULT AudioOutputCallback::QueryInterface(REFIID iid, LPVOID *ppv) {
 
     *ppv = NULL;
 
+#ifdef __linux__
+    // See AVOutputCallback::QueryInterface above — IID_IUnknown is Linux-only.
     const auto iid_unknown = IID_IUnknown;
-
     if (std::memcmp(&iid, &iid_unknown, sizeof(REFIID)) == 0) {
         *ppv = static_cast<IUnknown *>(static_cast<IDeckLinkAudioOutputCallback *>(this));
-    } else if (std::memcmp(&iid, &IID_IDeckLinkAudioOutputCallback, sizeof(REFIID)) == 0) {
+    } else
+#endif
+    if (std::memcmp(&iid, &IID_IDeckLinkAudioOutputCallback, sizeof(REFIID)) == 0) {
         *ppv = static_cast<IDeckLinkAudioOutputCallback *>(this);
     } else {
         return E_NOINTERFACE;
