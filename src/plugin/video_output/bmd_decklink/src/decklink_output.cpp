@@ -78,14 +78,29 @@ bool parse_decklink_version(const std::string &version, DeckLinkVersion &parsed)
         return false;
     }
 
+    // Accept "X", "X.Y", or "X.Y.Z" — the macOS DeckLink SDK reports the API
+    // version as e.g. "15.0" rather than "15.0.0", and rejecting that would
+    // bounce every Mac user through the "unsupported runtime" error path even
+    // when the driver is fine.
+    parsed = DeckLinkVersion{};
     std::stringstream ss(version);
-    char dot1 = 0;
-    char dot2 = 0;
-    if (!(ss >> parsed.major >> dot1 >> parsed.minor >> dot2 >> parsed.patch)) {
+    if (!(ss >> parsed.major)) {
         return false;
     }
-
-    return dot1 == '.' && dot2 == '.';
+    if (ss.eof()) {
+        return true;
+    }
+    char dot = 0;
+    if (!(ss >> dot) || dot != '.' || !(ss >> parsed.minor)) {
+        return false;
+    }
+    if (ss.eof()) {
+        return true;
+    }
+    if (!(ss >> dot) || dot != '.' || !(ss >> parsed.patch)) {
+        return false;
+    }
+    return true;
 }
 
 bool is_decklink_version_older_than(

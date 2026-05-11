@@ -189,36 +189,24 @@ void BMDecklinkPlugin::attribute_changed(const utility::Uuid &attribute_uuid, co
 
     if (dcl_output_) {
 
-        if (resolutions_ && attribute_uuid == resolutions_->uuid() &&
-            role == module::Attribute::Value) {
+        // Resolve the changed attribute via Module::get_attribute, which is
+        // defined in libmodule and therefore uses libmodule's typeid for Uuid.
+        // We then identify which attribute changed by pointer comparison, which
+        // is immune to the macOS cross-dylib typeinfo duplication that breaks
+        // direct attr->uuid() calls from this translation unit.
+        module::Attribute *changed = get_attribute(attribute_uuid);
 
-            const auto rates = dcl_output_->get_available_refresh_rates(resolutions_->value());
-            frame_rates_->set_role_data(module::Attribute::StringChoices, rates);
+        if (resolutions_ && changed == resolutions_ && role == module::Attribute::Value) {
 
-            // pick a sensible refresh rate, if the current rate isn't available for new
-            // resolution
-            auto i = std::find(
-                rates.begin(), rates.end(), frame_rates_->value()); // prefer current rate
-            if (i == rates.end()) {
-                i = std::find(rates.begin(), rates.end(), "24.0"); // otherwise prefer 24.0
-                if (i == rates.end()) {
-                    i = std::find(rates.begin(), rates.end(), "60.0"); // use 60.0 otherwise
-                    if (i == rates.end()) {
-                        i = rates.begin();
-                    }
-                }
-            }
-            if (i != rates.end()) {
-                frame_rates_->set_value(*i);
-            }
+            on_resolutions_changed();
 
-        } else if (attribute_uuid == start_stop_->uuid()) {
+        } else if (changed == start_stop_) {
 
             dcl_output_->StartStop();
         }
 
-        if (attribute_uuid == pixel_formats_->uuid() ||
-            attribute_uuid == resolutions_->uuid() || attribute_uuid == frame_rates_->uuid()) {
+        if (changed == pixel_formats_ || changed == resolutions_ ||
+            changed == frame_rates_) {
 
             try {
 
@@ -240,22 +228,22 @@ void BMDecklinkPlugin::attribute_changed(const utility::Uuid &attribute_uuid, co
                 is_in_error_->set_value(true);
             }
 
-        } else if (attribute_uuid == track_main_viewport_->uuid()) {
+        } else if (changed == track_main_viewport_) {
 
             sync_geometry_to_main_viewport(track_main_viewport_->value());
 
-        } else if (attribute_uuid == samples_water_level_->uuid()) {
+        } else if (changed == samples_water_level_) {
             dcl_output_->set_audio_samples_water_level(samples_water_level_->value());
-        } else if (attribute_uuid == audio_sync_delay_milliseconds_->uuid()) {
+        } else if (changed == audio_sync_delay_milliseconds_) {
             dcl_output_->set_audio_sync_delay_milliseconds(
                 audio_sync_delay_milliseconds_->value());
-        } else if (attribute_uuid == video_pipeline_delay_milliseconds_->uuid()) {
+        } else if (changed == video_pipeline_delay_milliseconds_) {
             video_delay_milliseconds(video_pipeline_delay_milliseconds_->value());
-        } else if (attribute_uuid == disable_pc_audio_when_running_->uuid()) {
+        } else if (changed == disable_pc_audio_when_running_) {
             set_pc_audio_muting();
-        } else if (attribute_uuid == sdi_output_is_running_->uuid()) {
+        } else if (changed == sdi_output_is_running_) {
             set_pc_audio_muting();
-        } else if (attribute_uuid == hdr_presets_->uuid()) {
+        } else if (changed == hdr_presets_) {
 
             if (hdr_presets_data_.contains(hdr_presets_->value())) {
 
@@ -269,9 +257,9 @@ void BMDecklinkPlugin::attribute_changed(const utility::Uuid &attribute_uuid, co
             }
 
         } else if (
-            role == module::Attribute::Value &&
-            hdr_metadata_settings_uuids_.find(attribute_uuid) !=
-                hdr_metadata_settings_uuids_.end()) {
+            role == module::Attribute::Value && changed != nullptr &&
+            hdr_metadata_settings_attrs_.find(changed) !=
+                hdr_metadata_settings_attrs_.end()) {
             set_hdr_mode_and_metadata();
             if (!prefs_save_scheduled_) {
                 prefs_save_scheduled_ = true;
@@ -283,6 +271,32 @@ void BMDecklinkPlugin::attribute_changed(const utility::Uuid &attribute_uuid, co
         }
     }
     StandardPlugin::attribute_changed(attribute_uuid, role);
+}
+
+void BMDecklinkPlugin::on_resolutions_changed() {
+
+    if (!dcl_output_ || !resolutions_ || !frame_rates_)
+        return;
+
+    const auto rates = dcl_output_->get_available_refresh_rates(resolutions_->value());
+    frame_rates_->set_role_data(module::Attribute::StringChoices, rates);
+
+    // pick a sensible refresh rate, if the current rate isn't available for new
+    // resolution
+    auto i = std::find(
+        rates.begin(), rates.end(), frame_rates_->value()); // prefer current rate
+    if (i == rates.end()) {
+        i = std::find(rates.begin(), rates.end(), "24.0"); // otherwise prefer 24.0
+        if (i == rates.end()) {
+            i = std::find(rates.begin(), rates.end(), "60.0"); // use 60.0 otherwise
+            if (i == rates.end()) {
+                i = rates.begin();
+            }
+        }
+    }
+    if (i != rates.end()) {
+        frame_rates_->set_value(*i);
+    }
 }
 
 audio::AudioOutputDevice *
@@ -347,7 +361,7 @@ void BMDecklinkPlugin::initialise() {
                 )");
 
         // now we are set-up we can kick ourselves to fill in the refresh rate list etc.
-        attribute_changed(resolutions_->uuid(), module::Attribute::Value);
+        on_resolutions_changed();
 
         if (auto_start_->value()) {
             // start output immediately if auto_start_ is enabled (via prefs)
@@ -409,14 +423,14 @@ void BMDecklinkPlugin::make_hdr_attributes() {
         "HDR Mode", "HDR Mode", "SDR", utility::map_key_to_vec(eotf_modes));
     hdr_mode_->expose_in_ui_attrs_group("Decklink HDR Settings");
     hdr_mode_->set_preference_path("/plugin/decklink/hdr_mode");
-    hdr_metadata_settings_uuids_.insert(hdr_mode_->uuid());
+    hdr_metadata_settings_attrs_.insert(hdr_mode_);
 
     // Add the Colourspace mode attribute
     colourspace_ = add_string_choice_attribute(
         "Colour Space", "Colour Space", "BT. 709", utility::map_key_to_vec(colourspaces));
     colourspace_->expose_in_ui_attrs_group("Decklink HDR Settings");
     colourspace_->set_preference_path("/plugin/decklink/colourspace");
-    hdr_metadata_settings_uuids_.insert(colourspace_->uuid());
+    hdr_metadata_settings_attrs_.insert(colourspace_);
 
     // Fetch the ocio display name match string for auto HDR mode switching
     auto prefs = global_store::GlobalStoreHelper(system());
@@ -455,7 +469,7 @@ void BMDecklinkPlugin::make_hdr_attributes() {
     for (const auto &o : hdr_metadata_value_names) {
         hdr_metadata_settings_.push_back(add_float_attribute(o, o, colour_settings[idx++]));
         hdr_metadata_settings_.back()->expose_in_ui_attrs_group("Decklink HDR Values");
-        hdr_metadata_settings_uuids_.insert(hdr_metadata_settings_.back()->uuid());
+        hdr_metadata_settings_attrs_.insert(hdr_metadata_settings_.back());
     }
 
 
@@ -487,7 +501,7 @@ void BMDecklinkPlugin::make_hdr_attributes() {
     for (const auto &o : light_level_controls_names) {
         hdr_metadata_lightlevel_.push_back(add_float_attribute(o, o, lum_settings[idx++]));
         hdr_metadata_lightlevel_.back()->expose_in_ui_attrs_group("Decklink HDR Values");
-        hdr_metadata_settings_uuids_.insert(hdr_metadata_lightlevel_.back()->uuid());
+        hdr_metadata_settings_attrs_.insert(hdr_metadata_lightlevel_.back());
     }
 
     try {

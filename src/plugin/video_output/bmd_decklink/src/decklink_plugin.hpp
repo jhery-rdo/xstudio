@@ -68,7 +68,12 @@ namespace bm_decklink_plugin_1_0 {
         module::StringChoiceAttribute *hdr_presets_{nullptr};
         std::vector<module::FloatAttribute *> hdr_metadata_settings_;
         std::vector<module::FloatAttribute *> hdr_metadata_lightlevel_;
-        std::set<utility::Uuid> hdr_metadata_settings_uuids_;
+        // NOTE: tracked by Attribute* pointer rather than Uuid on purpose. On macOS
+        // the typeinfo for utility::Uuid is emitted as a per-image hidden symbol, so
+        // calling attr->uuid() from this plugin's translation unit hits a
+        // bad_any_cast inside AttributeData::get<Uuid>() (the std::any was set in
+        // libmodule using libmodule's typeid). Pointer compares are immune.
+        std::set<module::Attribute *> hdr_metadata_settings_attrs_;
 
         std::string ocio_display_hdr_match_string_;
         utility::JsonStore hdr_presets_data_;
@@ -78,6 +83,7 @@ namespace bm_decklink_plugin_1_0 {
         void set_hdr_mode_and_metadata();
         void save_hdr_colour_prefs();
         std::string get_ocio_display_name();
+        void on_resolutions_changed();
     };
 
     // We require this boiler-plate to register our custom class as a QML
